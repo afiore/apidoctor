@@ -941,6 +941,7 @@ version = "0.1.0"
 dependencies = [
  "indexmap",
  "jsonschema",
+ "mime",
  "nonempty",
  "openapiv3",
  "serde_json",

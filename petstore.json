@@ -86,6 +86,10 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/NewPet"
+              },
+              "example": {
+                "name": 22,
+                "tag": "good"
               }
             }
           }
