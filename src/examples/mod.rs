@@ -10,59 +10,88 @@ use openapiv3::Response;
 use openapiv3::Schema;
 use openapiv3::StatusCode;
 use serde_json::Value;
+use thiserror::Error;
 
 #[derive(Debug)]
-pub struct ValidationError {
-    field_path: String,
+pub(crate) struct ValidationError {
     message: String,
 }
-impl<'a> From<&'a jsonschema::ValidationError<'a>> for ValidationError {
-    fn from(schema_err: &'a jsonschema::ValidationError<'a>) -> Self {
+
+impl<'a> From<jsonschema::ValidationError<'a>> for ValidationError {
+    fn from(err: jsonschema::ValidationError<'a>) -> Self {
         ValidationError {
-            field_path: format!("{}", &schema_err.schema_path),
-            message: format!("{}", &schema_err),
+            message: format!("{}", err),
         }
     }
 }
 
+#[derive(Error, Debug)]
+pub(crate) enum AppError {
+    #[error("Schema validation failed for some examples")]
+    ValidationFailed(NonEmpty<ValidationError>),
+    #[error("Couldn't compile JSON schema")]
+    InvalidSchema,
+}
+
+#[derive(Debug)]
+pub struct ExampleError {
+    example: Value,
+    schema: Value,
+    error: AppError,
+}
+
+pub(crate) type ErrorReport = IndexMap<OperationId, NonEmpty<ExampleError>>;
+
+//TODO: delete this
 #[derive(Debug)]
 struct ExampleWithSchema {
     example: Value,
     schema: Value,
 }
-
 impl ExampleWithSchema {
-    fn validate(&self) -> Result<(), NonEmpty<ValidationError>> {
-        let compiled_schema = JSONSchema::compile(&self.schema).expect("Cannot parse schema");
-        let result = compiled_schema.validate(&self.example);
-
-        if let Err(errors) = result {
-            let errors = NonEmpty::from_vec(
-                errors
-                    .map(|err| ValidationError::from(&err))
-                    .collect::<Vec<ValidationError>>(),
-            )
-            .expect("non-empty error list expected");
-            Err(errors)
-        } else {
-            Ok(())
-        }
-    }
     fn into_example_payload(self, is_request: bool) -> ExamplePayload {
         ExamplePayload {
             is_request,
-            example: self,
+            example: self.example,
+            schema: self.schema,
         }
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ExamplePayload {
     is_request: bool,
-    example: ExampleWithSchema,
+    example: Value,
+    schema: Value,
 }
 
 impl ExamplePayload {
+    fn validate(&self) -> Result<(), ExampleError> {
+        let compiled_schema = JSONSchema::compile(&self.schema).or_else(|_err| {
+            Err(ExampleError {
+                example: self.example.clone(),
+                schema: self.schema.clone(),
+                error: AppError::InvalidSchema,
+            })
+        })?;
+
+        compiled_schema.validate(&self.example).map_err(|errors| {
+            let error = AppError::ValidationFailed(
+                NonEmpty::from_vec(
+                    errors
+                        .map(ValidationError::from)
+                        .collect::<Vec<ValidationError>>(),
+                )
+                .expect("non-empty vec of ValidationError expected"),
+            );
+            ExampleError {
+                example: self.example.clone(),
+                schema: self.schema.clone(),
+                error,
+            }
+        })
+    }
+
     fn from_media_types(
         media_types: &IndexMap<String, MediaType>,
         schemas: &IndexMap<String, Schema>,
@@ -107,11 +136,9 @@ where
     match ref_or_value {
         ReferenceOr::Item(t) => Some(f(t)),
         ReferenceOr::Reference { reference } => {
-            //TODO: strip the entire prefix for all component types
-            let reference = reference.replace("#/components/schemas/", "");
-            println!("getting ref {}", reference);
-
-            all_by_ref.get(&reference)
+            let regex = regex::Regex::new("^#/components/[^/]*/").unwrap();
+            let reference = regex.replace_all(reference, "");
+            all_by_ref.get(reference.as_ref())
         }
     }
 }
@@ -131,7 +158,7 @@ impl<'s> From<WithSchemas<'s, MediaType>> for Option<ExampleWithSchema> {
     }
 }
 
-#[derive(PartialEq, Clone, Debug)]
+#[derive(PartialEq, Clone, Debug, Hash, Eq)]
 enum HttpMethod {
     GET,
     POST,
@@ -173,7 +200,7 @@ fn operation_for<'s>(
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct OperationId {
     path: String,
     method: HttpMethod,
@@ -192,16 +219,21 @@ struct OperationExamples {
     examples: NonEmpty<ExamplePayload>,
 }
 impl OperationExamples {
-    fn validate(&self) -> Result<(), NonEmpty<ValidationError>> {
+    fn validate(&self) -> Result<(), ErrorReport> {
+        let mut errors = Vec::new();
         for example_playload in &self.examples {
-            let result = example_playload.example.validate();
-            if result.is_err() {
-                return result;
-            } else {
-                continue;
+            if let Err(example_error) = example_playload.validate() {
+                errors.push(example_error);
             }
         }
-        Ok(())
+        match NonEmpty::from_vec(errors) {
+            None => Ok(()),
+            Some(errors) => {
+                let mut report = IndexMap::new();
+                report.insert(self.operation_id.clone(), errors);
+                Err(report)
+            }
+        }
     }
     fn from_operation(
         operation_id: OperationId,
@@ -224,8 +256,6 @@ impl OperationExamples {
             }
         }
 
-        println!("{:?}", &operation.request_body);
-
         if let Some(request_body) = operation
             .request_body
             .as_ref()
@@ -244,7 +274,7 @@ impl OperationExamples {
         })
     }
 }
-pub fn validate_from_spec(spec: &OpenAPI) -> Result<(), NonEmpty<ValidationError>> {
+pub(crate) fn validate_from_spec(spec: &OpenAPI) -> Result<(), ErrorReport> {
     let schemas = clone_items(
         spec.components
             .as_ref()
@@ -267,21 +297,24 @@ pub fn validate_from_spec(spec: &OpenAPI) -> Result<(), NonEmpty<ValidationError
     };
 
     let path_items = clone_items(Some(&spec.paths));
+    let mut report = IndexMap::new();
 
     for (path, path_item) in path_items {
         for (operation_id, operation) in operations_for(&path, &path_item) {
             if let Some(examples) =
                 OperationExamples::from_operation(operation_id, operation, &components)
             {
-                println!("got ops: {:?}", examples);
-                let result = examples.validate();
-                if result.is_err() {
-                    return result;
+                if let Err(operation_report) = examples.validate() {
+                    report.extend(operation_report);
                 }
             }
         }
     }
-    Ok(())
+    if report.len() == 0 {
+        Ok(())
+    } else {
+        Err(report)
+    }
 }
 
 fn is_json_media_type(media_type: &str) -> bool {
@@ -297,6 +330,7 @@ fn is_success(code: &StatusCode) -> bool {
     format!("{}", code).starts_with("2")
 }
 
+//TODO: can we just filter the map here
 fn clone_items<T: Clone>(
     components: Option<&IndexMap<String, ReferenceOr<T>>>,
 ) -> IndexMap<String, T> {
