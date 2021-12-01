@@ -1,8 +1,12 @@
+use std::fmt::Display;
+use std::io;
+
 use indexmap::IndexMap;
 use jsonschema::JSONSchema;
 use nonempty::NonEmpty;
 use openapiv3::MediaType;
 use openapiv3::OpenAPI;
+use openapiv3::Operation;
 use openapiv3::PathItem;
 use openapiv3::ReferenceOr;
 use openapiv3::RequestBody;
@@ -27,17 +31,58 @@ impl<'a> From<jsonschema::ValidationError<'a>> for ValidationError {
 
 #[derive(Error, Debug)]
 pub(crate) enum AppError {
+    #[error(
+        "Could not deserialise the supplied spec file. Is it a valid, json-encoded, OpenAPI spec?"
+    )]
+    DeserializeationError(#[from] serde_json::Error),
+    #[error("Could not find spec file")]
+    SpecFileNotFound(#[from] io::Error),
     #[error("Schema validation failed for some examples")]
     ValidationFailed(NonEmpty<ValidationError>),
-    #[error("Couldn't compile JSON schema")]
+    #[error("Unexpected error. Couldn't compile JSON schema")]
     InvalidSchema,
 }
 
 #[derive(Debug)]
 pub struct ExampleError {
+    is_request: bool,
     example: Value,
     schema: Value,
     error: AppError,
+}
+
+impl Display for ExampleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let snippet = serde_json::to_string_pretty(&self.example)
+            .expect("failed to serialise example to JSON");
+
+        let errors = match &self.error {
+            AppError::ValidationFailed(validation_errs) => {
+                let mut s = String::new();
+                for err in validation_errs {
+                    s.push_str(&format!(" - {}\n", err.message))
+                }
+                s
+            }
+
+            _ => format!("{}", &self.error),
+        };
+
+        let request_response = if self.is_request {
+            "request"
+        } else {
+            "response"
+        };
+
+        let schema =
+            serde_json::to_string_pretty(&self.schema).expect("failed to serialise schema to JSON");
+
+        write!(
+            f,
+            "Sample {} payload:\n\n{}\n\nValidation Errors:\n\n{}\n\nJSON Schema:\n\n{}",
+            request_response, snippet, errors, schema
+        )
+    }
 }
 
 pub(crate) type ErrorReport = IndexMap<OperationId, NonEmpty<ExampleError>>;
@@ -65,12 +110,54 @@ struct ExamplePayload {
     schema: Value,
 }
 
+fn to_reference(value: &Value) -> Option<&str> {
+    value.as_object().and_then(|props| {
+        props
+            .get("$ref")
+            .and_then(|r| r.as_str())
+            .filter(|_| props.len() == 1)
+    })
+}
+
+fn expand_schema_refs(schema: &mut Value, definitions: &IndexMap<String, Value>) {
+    match schema {
+        Value::Array(items) => {
+            for item in items {
+                expand_schema_refs(item, definitions);
+            }
+        }
+        //TODO: is there a way to avoid calling to_reference twice?
+        obj if to_reference(schema).is_some() => {
+            if let Some(reference) = to_reference(obj) {
+                let reference = strip_component_prefix(reference);
+                let definition = definitions
+                    .get(&reference)
+                    .expect(&format!("expected to find reference: {}", &reference));
+
+                //a reference can contain other references
+                let mut definition = definition.clone();
+                expand_schema_refs(&mut definition, definitions);
+                *obj = definition;
+            }
+        }
+        Value::Object(props) => {
+            for (_, value) in props {
+                expand_schema_refs(value, definitions);
+            }
+        }
+        _ => (),
+    }
+}
+
 impl ExamplePayload {
-    fn validate(&self) -> Result<(), ExampleError> {
-        let compiled_schema = JSONSchema::compile(&self.schema).or_else(|_err| {
+    fn validate(&self, definitions: &IndexMap<String, Value>) -> Result<(), ExampleError> {
+        let mut schema = self.schema.clone();
+        expand_schema_refs(&mut schema, definitions);
+        let compiled_schema = JSONSchema::compile(&schema).or_else(|_err| {
             Err(ExampleError {
+                is_request: self.is_request,
                 example: self.example.clone(),
-                schema: self.schema.clone(),
+                schema: schema.clone(),
                 error: AppError::InvalidSchema,
             })
         })?;
@@ -85,6 +172,7 @@ impl ExamplePayload {
                 .expect("non-empty vec of ValidationError expected"),
             );
             ExampleError {
+                is_request: self.is_request,
                 example: self.example.clone(),
                 schema: self.schema.clone(),
                 error,
@@ -125,6 +213,11 @@ fn extract_or_resolve<'a, T>(
     extract_or_apply(all_by_ref, ref_or_value, |t| t)
 }
 
+fn strip_component_prefix(s: &str) -> String {
+    let regex = regex::Regex::new("^#/components/[^/]*/").unwrap();
+    regex.replace_all(s, "").as_ref().to_owned()
+}
+
 fn extract_or_apply<'a, T, S, F>(
     all_by_ref: &'a IndexMap<String, S>,
     ref_or_value: &'a ReferenceOr<T>,
@@ -136,9 +229,8 @@ where
     match ref_or_value {
         ReferenceOr::Item(t) => Some(f(t)),
         ReferenceOr::Reference { reference } => {
-            let regex = regex::Regex::new("^#/components/[^/]*/").unwrap();
-            let reference = regex.replace_all(reference, "");
-            all_by_ref.get(reference.as_ref())
+            let reference = strip_component_prefix(reference);
+            all_by_ref.get(&reference)
         }
     }
 }
@@ -168,6 +260,13 @@ enum HttpMethod {
     HEAD,
     OPTIONS,
     TRACE,
+}
+
+impl Display for HttpMethod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = format!("{:?}", self);
+        write!(f, "{}", s.to_lowercase())
+    }
 }
 
 impl HttpMethod {
@@ -201,9 +300,44 @@ fn operation_for<'s>(
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub(crate) struct OperationId {
-    path: String,
-    method: HttpMethod,
+pub(crate) struct OperationId(String);
+
+impl Display for OperationId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl TryFrom<&Operation> for OperationId {
+    type Error = ();
+
+    fn try_from(op: &Operation) -> Result<Self, Self::Error> {
+        op.operation_id.clone().map(|id| OperationId(id)).ok_or(())
+    }
+}
+
+fn capitalize(s: &str) -> String {
+    let mut done = false;
+    s.chars()
+        .map(|c| {
+            if done {
+                c
+            } else {
+                done = true;
+                c.to_ascii_uppercase()
+            }
+        })
+        .collect()
+}
+fn camelize(path: &str) -> String {
+    path.split_terminator('/').map(|s| capitalize(s)).collect()
+}
+
+impl OperationId {
+    fn for_method_and_path(method: &HttpMethod, path: &str) -> Self {
+        let id = format!("{}{}", method, camelize(path));
+        OperationId(id)
+    }
 }
 
 #[derive(Debug)]
@@ -219,10 +353,10 @@ struct OperationExamples {
     examples: NonEmpty<ExamplePayload>,
 }
 impl OperationExamples {
-    fn validate(&self) -> Result<(), ErrorReport> {
+    fn validate(&self, definitions: &IndexMap<String, Value>) -> Result<(), ErrorReport> {
         let mut errors = Vec::new();
         for example_playload in &self.examples {
-            if let Err(example_error) = example_playload.validate() {
+            if let Err(example_error) = example_playload.validate(definitions) {
                 errors.push(example_error);
             }
         }
@@ -298,13 +432,20 @@ pub(crate) fn validate_from_spec(spec: &OpenAPI) -> Result<(), ErrorReport> {
 
     let path_items = clone_items(Some(&spec.paths));
     let mut report = IndexMap::new();
+    let mut schemas = IndexMap::new();
+    for (key, schema) in &components.schemas {
+        schemas.insert(
+            key.to_owned(),
+            serde_json::to_value(&schema).expect("Cannot serialise schema to json"),
+        );
+    }
 
     for (path, path_item) in path_items {
         for (operation_id, operation) in operations_for(&path, &path_item) {
             if let Some(examples) =
                 OperationExamples::from_operation(operation_id, operation, &components)
             {
-                if let Err(operation_report) = examples.validate() {
+                if let Err(operation_report) = examples.validate(&schemas) {
                     report.extend(operation_report);
                 }
             }
@@ -330,7 +471,6 @@ fn is_success(code: &StatusCode) -> bool {
     format!("{}", code).starts_with("2")
 }
 
-//TODO: can we just filter the map here
 fn clone_items<T: Clone>(
     components: Option<&IndexMap<String, ReferenceOr<T>>>,
 ) -> IndexMap<String, T> {
@@ -344,10 +484,8 @@ fn clone_items<T: Clone>(
                 _ => (),
             }
         }
-        values_by_key
-    } else {
-        values_by_key
     }
+    values_by_key
 }
 
 fn operations_for<'s>(
@@ -358,13 +496,9 @@ fn operations_for<'s>(
         .iter()
         .filter_map(|method| {
             operation_for(method, path_item).map(|operation| {
-                (
-                    OperationId {
-                        method: method.to_owned(),
-                        path: path.to_owned(),
-                    },
-                    operation,
-                )
+                let operation_id = OperationId::try_from(operation)
+                    .unwrap_or_else(|_| OperationId::for_method_and_path(method, path));
+                (operation_id, operation)
             })
         })
         .collect()
@@ -372,12 +506,76 @@ fn operations_for<'s>(
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
+
+    //TODO: for integration tests
+    // let data = include_str!("../petstore.json");
+
+    #[test]
+    fn test_operation_id() {
+        assert_eq!(
+            OperationId::for_method_and_path(&HttpMethod::PUT, &"/some/resource"),
+            OperationId("putSomeResource".to_owned())
+        );
+
+        assert_eq!(
+            OperationId::for_method_and_path(&HttpMethod::GET, &"thing"),
+            OperationId("getThing".to_owned())
+        );
+
+        assert_eq!(
+            OperationId::for_method_and_path(&HttpMethod::POST, &""),
+            OperationId("post".to_owned())
+        );
+    }
 
     #[test]
     fn test_is_json_media_type() {
         assert!(is_json_media_type("application/json"));
         assert!(is_json_media_type("application/vnd.api+json"));
         assert!(is_json_media_type("text/plain") == false);
+    }
+
+    #[test]
+    fn extract_or_resolve_gets_single_components() {
+        let mut test_component: IndexMap<String, char> = IndexMap::new();
+
+        test_component.insert("key-a".to_owned(), 'a');
+        test_component.insert("key-b".to_owned(), 'b');
+
+        assert_eq!(
+            extract_or_resolve(&test_component, &ReferenceOr::Item('x')),
+            Some(&'x')
+        );
+        let reference = "#/components/test/key-a".to_owned();
+        assert_eq!(
+            extract_or_resolve(&test_component, &ReferenceOr::Reference { reference }),
+            Some(&'a')
+        );
+    }
+    #[test]
+    fn expand_schema_refs_inlines_definitions_into_a_schema() {
+        let mut definitions: IndexMap<String, Value> = IndexMap::new();
+        definitions.insert("Entity".to_owned(), json!({"type": "string"}));
+        let mut schema = json!(
+            {
+                "properties": {
+                  "connections": {
+                    "items": {
+                      "$ref": "#/components/schemas/Entity"
+                    },
+                    "type": "array"
+                  }
+                },
+                "type": "object"
+              }
+        );
+        expand_schema_refs(&mut schema, &definitions);
+        assert_eq!(
+            schema.pointer("/properties/connections/items"),
+            Some(&json!({"type": "string"}))
+        )
     }
 }

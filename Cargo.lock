@@ -33,6 +33,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "apidoctor"
+version = "0.1.0"
+dependencies = [
+ "indexmap",
+ "jsonschema",
+ "mime",
+ "nonempty",
+ "openapiv3",
+ "regex",
+ "serde_json",
+ "serde_yaml",
+ "structopt",
+ "thiserror",
+ "validated",
+]
+
+[[package]]
 name = "atty"
 version = "0.2.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -933,22 +950,6 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "winreg",
-]
-
-[[package]]
-name = "revisor"
-version = "0.1.0"
-dependencies = [
- "indexmap",
- "jsonschema",
- "mime",
- "nonempty",
- "openapiv3",
- "regex",
- "serde_json",
- "structopt",
- "thiserror",
- "validated",
 ]
 
 [[package]]
