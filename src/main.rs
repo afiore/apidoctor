@@ -5,7 +5,7 @@ use structopt::StructOpt;
 use thiserror::Error;
 
 mod examples;
-mod reporting;
+mod openapi;
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "apidoctor", about = "An API spec linter")]

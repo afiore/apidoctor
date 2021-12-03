@@ -6,8 +6,6 @@ use jsonschema::JSONSchema;
 use nonempty::NonEmpty;
 use openapiv3::MediaType;
 use openapiv3::OpenAPI;
-use openapiv3::Operation;
-use openapiv3::PathItem;
 use openapiv3::ReferenceOr;
 use openapiv3::RequestBody;
 use openapiv3::Response;
@@ -15,6 +13,9 @@ use openapiv3::Schema;
 use openapiv3::StatusCode;
 use serde_json::Value;
 use thiserror::Error;
+
+use crate::openapi::operations_for;
+use crate::openapi::OperationId;
 
 #[derive(Debug)]
 pub(crate) struct ValidationError {
@@ -86,22 +87,6 @@ impl Display for ExampleError {
 }
 
 pub(crate) type ErrorReport = IndexMap<OperationId, NonEmpty<ExampleError>>;
-
-//TODO: delete this
-#[derive(Debug)]
-struct ExampleWithSchema {
-    example: Value,
-    schema: Value,
-}
-impl ExampleWithSchema {
-    fn into_example_payload(self, is_request: bool) -> ExamplePayload {
-        ExamplePayload {
-            is_request,
-            example: self.example,
-            schema: self.schema,
-        }
-    }
-}
 
 #[derive(Debug)]
 struct ExamplePayload {
@@ -188,11 +173,8 @@ impl ExamplePayload {
         let mut examples = Vec::new();
         for (media_type, media_type_response) in media_types {
             if is_json_media_type(media_type) {
-                if let Some(example) = Option::from(WithSchemas {
-                    schemas,
-                    value: media_type_response.clone(), //avoid clone?
-                })
-                .map(|example: ExampleWithSchema| example.into_example_payload(is_request))
+                if let Some(example) =
+                    ExamplePayload::from_media_type(media_type_response, schemas, is_request)
                 {
                     examples.push(example);
                 }
@@ -202,10 +184,6 @@ impl ExamplePayload {
     }
 }
 
-struct WithSchemas<'s, T> {
-    schemas: &'s IndexMap<String, Schema>,
-    value: T,
-}
 fn extract_or_resolve<'a, T>(
     all_by_ref: &'a IndexMap<String, T>,
     ref_or_value: &'a ReferenceOr<T>,
@@ -235,108 +213,25 @@ where
     }
 }
 
-impl<'s> From<WithSchemas<'s, MediaType>> for Option<ExampleWithSchema> {
-    fn from(with_schemas: WithSchemas<MediaType>) -> Self {
-        let WithSchemas { schemas, value } = with_schemas;
-        value.example.and_then(|example| {
-            value.schema.and_then(|schema_or_ref| {
-                extract_or_resolve(&schemas, &schema_or_ref).map(|schema| {
-                    let schema = serde_json::to_value(schema)
-                        .expect(&format!("Cannot serialise as JSON: {:?}", schema));
-                    ExampleWithSchema { example, schema }
-                })
-            })
-        })
-    }
-}
+impl ExamplePayload {
+    fn from_media_type(
+        media_type: &MediaType,
+        schemas: &IndexMap<String, Schema>,
+        is_request: bool,
+    ) -> Option<Self> {
+        let example = media_type.example.as_ref()?;
+        let schema_or_ref = media_type.schema.as_ref()?;
 
-#[derive(PartialEq, Clone, Debug, Hash, Eq)]
-enum HttpMethod {
-    GET,
-    POST,
-    PUT,
-    DELETE,
-    PATCH,
-    HEAD,
-    OPTIONS,
-    TRACE,
-}
-
-impl Display for HttpMethod {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = format!("{:?}", self);
-        write!(f, "{}", s.to_lowercase())
-    }
-}
-
-impl HttpMethod {
-    fn all() -> Vec<HttpMethod> {
-        vec![
-            HttpMethod::GET,
-            HttpMethod::POST,
-            HttpMethod::PUT,
-            HttpMethod::DELETE,
-            HttpMethod::PATCH,
-            HttpMethod::HEAD,
-            HttpMethod::OPTIONS,
-            HttpMethod::TRACE,
-        ]
-    }
-}
-fn operation_for<'s>(
-    method: &HttpMethod,
-    path_item: &'s PathItem,
-) -> Option<&'s openapiv3::Operation> {
-    match method {
-        HttpMethod::GET => path_item.get.as_ref(),
-        HttpMethod::POST => path_item.post.as_ref(),
-        HttpMethod::PUT => path_item.put.as_ref(),
-        HttpMethod::DELETE => path_item.delete.as_ref(),
-        HttpMethod::HEAD => path_item.head.as_ref(),
-        HttpMethod::PATCH => path_item.patch.as_ref(),
-        HttpMethod::OPTIONS => path_item.options.as_ref(),
-        HttpMethod::TRACE => path_item.trace.as_ref(),
-    }
-}
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub(crate) struct OperationId(String);
-
-impl Display for OperationId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl TryFrom<&Operation> for OperationId {
-    type Error = ();
-
-    fn try_from(op: &Operation) -> Result<Self, Self::Error> {
-        op.operation_id.clone().map(|id| OperationId(id)).ok_or(())
-    }
-}
-
-fn capitalize(s: &str) -> String {
-    let mut done = false;
-    s.chars()
-        .map(|c| {
-            if done {
-                c
-            } else {
-                done = true;
-                c.to_ascii_uppercase()
+        extract_or_resolve(&schemas, schema_or_ref).map(|schema| {
+            let schema = serde_json::to_value(schema)
+                .expect(&format!("Cannot serialise as JSON: {:?}", schema));
+            ExamplePayload {
+                //TODO: review clone
+                example: example.clone(),
+                schema,
+                is_request,
             }
         })
-        .collect()
-}
-fn camelize(path: &str) -> String {
-    path.split_terminator('/').map(|s| capitalize(s)).collect()
-}
-
-impl OperationId {
-    fn for_method_and_path(method: &HttpMethod, path: &str) -> Self {
-        let id = format!("{}{}", method, camelize(path));
-        OperationId(id)
     }
 }
 
@@ -488,48 +383,13 @@ fn clone_items<T: Clone>(
     values_by_key
 }
 
-fn operations_for<'s>(
-    path: &str,
-    path_item: &'s openapiv3::PathItem,
-) -> Vec<(OperationId, &'s openapiv3::Operation)> {
-    HttpMethod::all()
-        .iter()
-        .filter_map(|method| {
-            operation_for(method, path_item).map(|operation| {
-                let operation_id = OperationId::try_from(operation)
-                    .unwrap_or_else(|_| OperationId::for_method_and_path(method, path));
-                (operation_id, operation)
-            })
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-
     use super::*;
+    use serde_json::json;
 
     //TODO: for integration tests
     // let data = include_str!("../petstore.json");
-
-    #[test]
-    fn test_operation_id() {
-        assert_eq!(
-            OperationId::for_method_and_path(&HttpMethod::PUT, &"/some/resource"),
-            OperationId("putSomeResource".to_owned())
-        );
-
-        assert_eq!(
-            OperationId::for_method_and_path(&HttpMethod::GET, &"thing"),
-            OperationId("getThing".to_owned())
-        );
-
-        assert_eq!(
-            OperationId::for_method_and_path(&HttpMethod::POST, &""),
-            OperationId("post".to_owned())
-        );
-    }
 
     #[test]
     fn test_is_json_media_type() {
