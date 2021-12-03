@@ -103,7 +103,7 @@ impl ExampleWithSchema {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct ExamplePayload {
     is_request: bool,
     example: Value,
@@ -556,15 +556,20 @@ mod tests {
         );
     }
     #[test]
-    fn expand_schema_refs_inlines_definitions_into_a_schema() {
+    fn recursively_expands_schema_refs() {
         let mut definitions: IndexMap<String, Value> = IndexMap::new();
-        definitions.insert("Entity".to_owned(), json!({"type": "string"}));
+        definitions.insert(
+            "Entity1".to_owned(),
+            json!({"$ref": "#/components/schemas/Entity2"}),
+        );
+        definitions.insert("Entity2".to_owned(), json!({"type": "string"}));
+
         let mut schema = json!(
             {
                 "properties": {
                   "connections": {
                     "items": {
-                      "$ref": "#/components/schemas/Entity"
+                      "$ref": "#/components/schemas/Entity1"
                     },
                     "type": "array"
                   }
