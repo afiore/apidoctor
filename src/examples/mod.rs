@@ -9,7 +9,6 @@ use openapiv3::OpenAPI;
 use openapiv3::ReferenceOr;
 use openapiv3::RequestBody;
 use openapiv3::Response;
-use openapiv3::Schema;
 use openapiv3::StatusCode;
 use serde_json::Value;
 use thiserror::Error;
@@ -168,7 +167,7 @@ impl ExamplePayload {
 
     fn from_media_types(
         media_types: &IndexMap<String, MediaType>,
-        schemas: &IndexMap<String, Schema>,
+        schemas: &IndexMap<String, Value>,
         is_request: bool,
     ) -> Vec<ExamplePayload> {
         let mut examples = Vec::new();
@@ -217,13 +216,21 @@ where
 impl ExamplePayload {
     fn from_media_type(
         media_type: &MediaType,
-        schemas: &IndexMap<String, Schema>,
+        schemas: &IndexMap<String, Value>,
         is_request: bool,
     ) -> Option<Self> {
         let example = media_type.example.as_ref()?;
-        let schema_or_ref = media_type.schema.as_ref()?;
+        let schema_or_ref = media_type.schema.as_ref().map(|x| match x {
+            ReferenceOr::Item(schema) => ReferenceOr::Item(
+                serde_json::to_value(schema)
+                    .expect(&format!("Cannot serialise as JSON: {:?}", schema)),
+            ),
+            ReferenceOr::Reference { reference } => ReferenceOr::Reference {
+                reference: reference.to_owned(),
+            },
+        })?;
 
-        extract_or_resolve(&schemas, schema_or_ref).map(|schema| {
+        extract_or_resolve(&schemas, &schema_or_ref).map(|schema| {
             let schema = serde_json::to_value(schema)
                 .expect(&format!("Cannot serialise as JSON: {:?}", schema));
             ExamplePayload {
@@ -238,9 +245,42 @@ impl ExamplePayload {
 
 #[derive(Debug)]
 struct Components {
-    schemas: IndexMap<String, Schema>,
+    schemas: IndexMap<String, Value>,
     responses: IndexMap<String, Response>,
     requests: IndexMap<String, RequestBody>,
+}
+
+impl Default for Components {
+    fn default() -> Self {
+        Self {
+            schemas: Default::default(),
+            responses: Default::default(),
+            requests: Default::default(),
+        }
+    }
+}
+
+impl Components {
+    fn new(inner: &openapiv3::Components) -> Self {
+        let schemas: IndexMap<String, Value> = clone_items(&inner.schemas)
+            .iter()
+            .map(|(key, schema)| {
+                (
+                    key.to_owned(),
+                    serde_json::to_value(&schema).expect("Cannot serialise schema to json"),
+                )
+            })
+            .collect();
+
+        let responses = clone_items(&inner.responses);
+        let requests = clone_items(&inner.request_bodies);
+
+        Components {
+            schemas,
+            responses,
+            requests,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -305,50 +345,26 @@ impl OperationExamples {
     }
 }
 pub(crate) fn validate_from_spec(spec: &OpenAPI) -> Result<(), ErrorReport> {
-    let schemas = clone_items(
-        spec.components
-            .as_ref()
-            .map(|components| &components.schemas),
-    );
-    let responses = clone_items(
-        spec.components
-            .as_ref()
-            .map(|components| &components.responses),
-    );
-    let requests = clone_items(
-        spec.components
-            .as_ref()
-            .map(|components| &components.request_bodies),
-    );
-    let components = Components {
-        schemas,
-        responses,
-        requests,
-    };
+    let components = spec
+        .components
+        .as_ref()
+        .map(Components::new)
+        .unwrap_or_default();
 
     //TODO: capture the following counts
     // - total path items
     // - path items missing an example (i.e. has "requestBody", success response has schema)
     // - path items with no description/tags
 
-    let path_items = clone_items(Some(&spec.paths));
+    let path_items = clone_items(&spec.paths);
     let mut report = IndexMap::new();
-
-    //TODO: consider exposing this from `Components`
-    let mut schemas = IndexMap::new();
-    for (key, schema) in &components.schemas {
-        schemas.insert(
-            key.to_owned(),
-            serde_json::to_value(&schema).expect("Cannot serialise schema to json"),
-        );
-    }
 
     for (path, path_item) in path_items {
         for (operation_id, operation) in operations_for(&path, &path_item) {
             if let Some(examples) =
                 OperationExamples::from_operation(operation_id, operation, &components)
             {
-                if let Err(operation_report) = examples.validate(&schemas) {
+                if let Err(operation_report) = examples.validate(&components.schemas) {
                     report.extend(operation_report);
                 }
             }
@@ -374,18 +390,14 @@ fn is_success(code: &StatusCode) -> bool {
     format!("{}", code).starts_with("2")
 }
 
-fn clone_items<T: Clone>(
-    components: Option<&IndexMap<String, ReferenceOr<T>>>,
-) -> IndexMap<String, T> {
+fn clone_items<T: Clone>(components: &IndexMap<String, ReferenceOr<T>>) -> IndexMap<String, T> {
     let mut values_by_key: IndexMap<String, T> = IndexMap::new();
-    if let Some(components) = components {
-        for (key, reference_or_t) in components {
-            match reference_or_t {
-                ReferenceOr::Item(t) => {
-                    values_by_key.insert(key.to_owned(), t.clone());
-                }
-                _ => (),
+    for (key, reference_or_t) in components {
+        match reference_or_t {
+            ReferenceOr::Item(t) => {
+                values_by_key.insert(key.to_owned(), t.clone());
             }
+            _ => (),
         }
     }
     values_by_key
