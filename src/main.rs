@@ -28,7 +28,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     if let Err(errors) = examples::validate_from_spec(&spec) {
         for (operation_id, errors) in errors {
             println!(
-                "[OPERATION-ID {}]\n\nSome payload examples fail schema validation:\n\n",
+                "[OPERATION-ID {}]\n\npayload examples fail schema validation:\n\n",
                 operation_id,
             );
             for err in errors {
@@ -37,7 +37,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         Err(Box::new(CmdError::ValidationFailed))
     } else {
-        eprint!("LGTM!");
         Ok(())
     }
 }

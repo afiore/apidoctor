@@ -104,6 +104,7 @@ fn to_reference(value: &Value) -> Option<&str> {
     })
 }
 
+//THIS should be done once and forall when we extract the schemas
 fn expand_schema_refs(schema: &mut Value, definitions: &IndexMap<String, Value>) {
     match schema {
         Value::Array(items) => {
@@ -325,8 +326,15 @@ pub(crate) fn validate_from_spec(spec: &OpenAPI) -> Result<(), ErrorReport> {
         requests,
     };
 
+    //TODO: capture the following counts
+    // - total path items
+    // - path items missing an example (i.e. has "requestBody", success response has schema)
+    // - path items with no description/tags
+
     let path_items = clone_items(Some(&spec.paths));
     let mut report = IndexMap::new();
+
+    //TODO: consider exposing this from `Components`
     let mut schemas = IndexMap::new();
     for (key, schema) in &components.schemas {
         schemas.insert(
