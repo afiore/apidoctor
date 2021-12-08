@@ -24,18 +24,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     let cmd = Cmd::from_iter(env::args());
     let spec = std::fs::read_to_string(&cmd.spec)?;
     let spec: OpenAPI = serde_json::from_str(&spec)?;
+    let outcome = openapi::validate_from_spec(&spec);
 
-    if let Err(errors) = examples::validate_from_spec(&spec) {
+    println!("stats: {:?}", outcome.stats);
+
+    if let Err(errors) = outcome.result {
         for (operation_id, errors) in errors {
-            println!(
-                "[OPERATION-ID {}]\n\npayload examples fail schema validation:\n\n",
-                operation_id,
-            );
+            println!("[OPERATION-ID {}]\n", operation_id,);
             for err in errors {
                 println!("{}", err);
             }
         }
-        Err(Box::new(CmdError::ValidationFailed))
+        Err(CmdError::ValidationFailed.into())
     } else {
         Ok(())
     }

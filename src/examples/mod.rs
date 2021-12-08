@@ -1,20 +1,18 @@
+use std::collections::HashSet;
+use std::error::Error;
 use std::fmt::Display;
 use std::io;
 
+use crate::openapi::is_success;
+use crate::openapi::Components;
+use crate::openapi::OperationId;
 use indexmap::IndexMap;
 use jsonschema::JSONSchema;
 use nonempty::NonEmpty;
 use openapiv3::MediaType;
-use openapiv3::OpenAPI;
+use openapiv3::Operation;
 use openapiv3::ReferenceOr;
-use openapiv3::RequestBody;
-use openapiv3::Response;
-use openapiv3::StatusCode;
 use serde_json::Value;
-use thiserror::Error;
-
-use crate::openapi::operations_for;
-use crate::openapi::OperationId;
 
 #[derive(Debug)]
 pub(crate) struct ValidationError {
@@ -29,7 +27,7 @@ impl<'a> From<jsonschema::ValidationError<'a>> for ValidationError {
     }
 }
 
-#[derive(Error, Debug)]
+#[derive(thiserror::Error, Debug)]
 pub(crate) enum AppError {
     #[error(
         "Could not deserialise the supplied spec file. Is it a valid, json-encoded, OpenAPI spec?"
@@ -50,6 +48,8 @@ pub struct ExampleError {
     schema: Value,
     error: AppError,
 }
+
+impl Error for ExampleError {}
 
 impl Display for ExampleError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -244,52 +244,15 @@ impl ExamplePayload {
 }
 
 #[derive(Debug)]
-struct Components {
-    schemas: IndexMap<String, Value>,
-    responses: IndexMap<String, Response>,
-    requests: IndexMap<String, RequestBody>,
-}
-
-impl Default for Components {
-    fn default() -> Self {
-        Self {
-            schemas: Default::default(),
-            responses: Default::default(),
-            requests: Default::default(),
-        }
-    }
-}
-
-impl Components {
-    fn new(inner: &openapiv3::Components) -> Self {
-        let schemas: IndexMap<String, Value> = clone_items(&inner.schemas)
-            .iter()
-            .map(|(key, schema)| {
-                (
-                    key.to_owned(),
-                    serde_json::to_value(&schema).expect("Cannot serialise schema to json"),
-                )
-            })
-            .collect();
-
-        let responses = clone_items(&inner.responses);
-        let requests = clone_items(&inner.request_bodies);
-
-        Components {
-            schemas,
-            responses,
-            requests,
-        }
-    }
-}
-
-#[derive(Debug)]
-struct OperationExamples {
+pub(crate) struct OperationExamples {
     operation_id: OperationId,
     examples: NonEmpty<ExamplePayload>,
 }
 impl OperationExamples {
-    fn validate(&self, definitions: &IndexMap<String, Value>) -> Result<(), ErrorReport> {
+    pub(crate) fn validate(
+        &self,
+        definitions: &IndexMap<String, Value>,
+    ) -> Result<(), ErrorReport> {
         let mut errors = Vec::new();
         for example_playload in &self.examples {
             if let Err(example_error) = example_playload.validate(definitions) {
@@ -305,8 +268,29 @@ impl OperationExamples {
             }
         }
     }
+
+    pub(crate) fn from_operations(
+        operations: &Vec<(OperationId, &Operation)>,
+        components: &Components,
+    ) -> Result<(), ErrorReport> {
+        let mut report = IndexMap::new();
+
+        for (operation_id, operation) in operations {
+            if let Some(examples) = Self::from_operation(operation_id, operation, &components) {
+                if let Err(operation_report) = examples.validate(&components.schemas) {
+                    report.extend(operation_report);
+                }
+            }
+        }
+        if report.len() == 0 {
+            Ok(())
+        } else {
+            Err(report)
+        }
+    }
+
     fn from_operation(
-        operation_id: OperationId,
+        operation_id: &OperationId,
         operation: &openapiv3::Operation,
         components: &Components,
     ) -> Option<OperationExamples> {
@@ -339,41 +323,9 @@ impl OperationExamples {
         }
 
         NonEmpty::from_vec(examples).map(|examples| OperationExamples {
-            operation_id,
+            operation_id: operation_id.clone(),
             examples,
         })
-    }
-}
-pub(crate) fn validate_from_spec(spec: &OpenAPI) -> Result<(), ErrorReport> {
-    let components = spec
-        .components
-        .as_ref()
-        .map(Components::new)
-        .unwrap_or_default();
-
-    //TODO: capture the following counts
-    // - total path items
-    // - path items missing an example (i.e. has "requestBody", success response has schema)
-    // - path items with no description/tags
-
-    let path_items = clone_items(&spec.paths);
-    let mut report = IndexMap::new();
-
-    for (path, path_item) in path_items {
-        for (operation_id, operation) in operations_for(&path, &path_item) {
-            if let Some(examples) =
-                OperationExamples::from_operation(operation_id, operation, &components)
-            {
-                if let Err(operation_report) = examples.validate(&components.schemas) {
-                    report.extend(operation_report);
-                }
-            }
-        }
-    }
-    if report.len() == 0 {
-        Ok(())
-    } else {
-        Err(report)
     }
 }
 
@@ -386,21 +338,46 @@ fn is_json_media_type(media_type: &str) -> bool {
     }
 }
 
-fn is_success(code: &StatusCode) -> bool {
-    format!("{}", code).starts_with("2")
+fn payload_schemas_without_example(content: &IndexMap<String, MediaType>) -> bool {
+    content.iter().any(|(media_type, media_type_response)| {
+        is_json_media_type(media_type)
+            && media_type_response.schema.is_some()
+            && media_type_response.example.is_none()
+    })
 }
 
-fn clone_items<T: Clone>(components: &IndexMap<String, ReferenceOr<T>>) -> IndexMap<String, T> {
-    let mut values_by_key: IndexMap<String, T> = IndexMap::new();
-    for (key, reference_or_t) in components {
-        match reference_or_t {
-            ReferenceOr::Item(t) => {
-                values_by_key.insert(key.to_owned(), t.clone());
-            }
-            _ => (),
+fn needs_example(operation: &Operation) -> bool {
+    let response_schema_without_example =
+        operation
+            .responses
+            .responses
+            .iter()
+            .any(|(status_code, ref_or_item)| {
+                is_success(status_code)
+                    && match ref_or_item {
+                        ReferenceOr::Item(response) => {
+                            payload_schemas_without_example(&response.content)
+                        }
+                        _ => false,
+                    }
+            });
+
+    let request_schema_without_example = match &operation.request_body {
+        Some(ReferenceOr::Item(request)) => payload_schemas_without_example(&request.content),
+        _ => false,
+    };
+
+    response_schema_without_example || request_schema_without_example
+}
+
+pub(crate) fn need_example(operations: &Vec<(OperationId, &Operation)>) -> HashSet<OperationId> {
+    let mut operation_ids = HashSet::new();
+    for (operation_id, operation) in operations {
+        if needs_example(operation) {
+            operation_ids.insert(operation_id.clone());
         }
     }
-    values_by_key
+    operation_ids
 }
 
 #[cfg(test)]

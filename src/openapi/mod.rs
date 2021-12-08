@@ -1,6 +1,11 @@
-use std::fmt::Display;
+use std::{error::Error, fmt::Display};
 
-use openapiv3::{Operation, PathItem};
+use indexmap::IndexMap;
+use nonempty::NonEmpty;
+use openapiv3::{OpenAPI, Operation, PathItem, ReferenceOr, RequestBody, Response, StatusCode};
+use serde_json::Value;
+
+use crate::examples::{need_example, OperationExamples};
 
 #[derive(PartialEq, Clone, Debug, Hash, Eq)]
 enum HttpMethod {
@@ -109,6 +114,10 @@ pub(crate) fn operations_for<'s>(
         .collect()
 }
 
+pub(crate) fn is_success(code: &StatusCode) -> bool {
+    format!("{}", code).starts_with("2")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,5 +137,156 @@ mod tests {
             OperationId::for_method_and_path(&HttpMethod::POST, &""),
             OperationId("post".to_owned())
         );
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct Components {
+    pub schemas: IndexMap<String, Value>,
+    pub responses: IndexMap<String, Response>,
+    pub requests: IndexMap<String, RequestBody>,
+}
+
+impl Default for Components {
+    fn default() -> Self {
+        Self {
+            schemas: Default::default(),
+            responses: Default::default(),
+            requests: Default::default(),
+        }
+    }
+}
+
+impl Components {
+    pub(crate) fn new(inner: &openapiv3::Components) -> Self {
+        let schemas: IndexMap<String, Value> = clone_items(&inner.schemas)
+            .iter()
+            .map(|(key, schema)| {
+                (
+                    key.to_owned(),
+                    serde_json::to_value(&schema).expect("Cannot serialise schema to json"),
+                )
+            })
+            .collect();
+
+        let responses = clone_items(&inner.responses);
+        let requests = clone_items(&inner.request_bodies);
+
+        Components {
+            schemas,
+            responses,
+            requests,
+        }
+    }
+}
+pub(crate) fn clone_items<T: Clone>(
+    components: &IndexMap<String, ReferenceOr<T>>,
+) -> IndexMap<String, T> {
+    let mut values_by_key: IndexMap<String, T> = IndexMap::new();
+    for (key, reference_or_t) in components {
+        match reference_or_t {
+            ReferenceOr::Item(t) => {
+                values_by_key.insert(key.to_owned(), t.clone());
+            }
+            _ => (),
+        }
+    }
+    values_by_key
+}
+
+#[derive(Debug)]
+pub(crate) struct Stats {
+    total_operations: u16,
+    operations_needing_examples: u16,
+}
+
+impl Default for Stats {
+    fn default() -> Self {
+        Self {
+            total_operations: Default::default(),
+            operations_needing_examples: Default::default(),
+        }
+    }
+}
+
+type OperationErrors = IndexMap<OperationId, NonEmpty<Box<dyn Error>>>;
+
+#[derive(Debug)]
+pub(crate) struct ValidationOutcome {
+    pub stats: Stats,
+    pub result: Result<(), OperationErrors>,
+}
+
+impl ValidationOutcome {
+    fn ok(stats: Stats) -> Self {
+        ValidationOutcome {
+            stats,
+            result: Ok(()),
+        }
+    }
+    fn error(stats: Stats, report: OperationErrors) -> Self {
+        ValidationOutcome {
+            stats,
+            result: Err(report),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct NeedsExample;
+
+impl Display for NeedsExample {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "needs an example")
+    }
+}
+
+impl std::error::Error for NeedsExample {}
+
+pub(crate) fn validate_from_spec(spec: &OpenAPI) -> ValidationOutcome {
+    let components = spec
+        .components
+        .as_ref()
+        .map(Components::new)
+        .unwrap_or_default();
+
+    //TODO: capture the following counts
+    // - path items missing an example (i.e. has "requestBody", success response has schema)
+    // - path items with no description/tags
+
+    let mut stats = Stats::default();
+    let path_items = clone_items(&spec.paths);
+    let mut report: OperationErrors = IndexMap::new();
+
+    for (path, path_item) in path_items {
+        let operations = operations_for(&path, &path_item);
+        let needing_examples = need_example(&operations);
+
+        stats.total_operations += operations.len() as u16;
+        stats.operations_needing_examples += needing_examples.len() as u16;
+
+        if let Err(operation_report) = OperationExamples::from_operations(&operations, &components)
+        {
+            let operation_report: OperationErrors = operation_report
+                .into_iter()
+                .map(|(op_id, errors)| (op_id.to_owned(), errors.map(|e| e.into())))
+                .collect();
+
+            report.extend(operation_report);
+        }
+
+        for operation_id in needing_examples {
+            if let Some(errors) = report.get_mut(&operation_id) {
+                errors.push(NeedsExample.into());
+            } else {
+                report.insert(operation_id, NonEmpty::new(NeedsExample.into()));
+            }
+        }
+    }
+
+    if report.len() == 0 {
+        ValidationOutcome::ok(stats)
+    } else {
+        ValidationOutcome::error(stats, report)
     }
 }
