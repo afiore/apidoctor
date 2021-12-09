@@ -240,33 +240,34 @@ pub(crate) fn validate_from_spec(spec: &OpenAPI) -> ValidationOutcome {
         .unwrap_or_default();
 
     let mut stats = Stats::default();
+    let mut report = IndexMap::new();
+
     let path_items = clone_items(&spec.paths);
-    let mut report: OperationErrors = IndexMap::new();
 
-    for (path, path_item) in path_items {
-        let operations = operations_for(&path, &path_item);
+    let operations: Vec<(OperationId, &Operation)> = path_items
+        .iter()
+        .flat_map(|(path, path_item)| operations_for(path, path_item))
+        .collect();
 
-        stats.total_operations += operations.len() as u16;
+    stats.total_operations += operations.len() as u16;
 
-        if let Err(operation_report) = OperationExamples::from_operations(&operations, &components)
-        {
-            let operation_report: OperationErrors = operation_report
-                .into_iter()
-                .map(|(op_id, errors)| (op_id.to_owned(), errors.map(|e| e.into())))
-                .collect();
+    if let Err(operation_report) = OperationExamples::from_operations(&operations, &components) {
+        let operation_report: OperationErrors = operation_report
+            .into_iter()
+            .map(|(op_id, errors)| (op_id.to_owned(), errors.map(|e| e.into())))
+            .collect();
 
-            report.extend(operation_report);
-        }
+        report.extend(operation_report);
+    }
 
-        if let Err(needing_examples) = need_example(&operations) {
-            stats.operations_needing_examples += needing_examples.len() as u16;
+    if let Err(needing_examples) = need_example(&operations) {
+        stats.operations_needing_examples += needing_examples.len() as u16;
 
-            for (operation_id, schema_needing_example) in needing_examples {
-                if let Some(errors) = report.get_mut(&operation_id) {
-                    errors.push(schema_needing_example.into());
-                } else {
-                    report.insert(operation_id, NonEmpty::new(schema_needing_example.into()));
-                }
+        for (operation_id, schema_needing_example) in needing_examples {
+            if let Some(errors) = report.get_mut(&operation_id) {
+                errors.push(schema_needing_example.into());
+            } else {
+                report.insert(operation_id, NonEmpty::new(schema_needing_example.into()));
             }
         }
     }
