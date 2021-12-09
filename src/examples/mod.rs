@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::error::Error;
 use std::fmt::Display;
 use std::io;
@@ -338,46 +337,95 @@ fn is_json_media_type(media_type: &str) -> bool {
     }
 }
 
-fn payload_schemas_without_example(content: &IndexMap<String, MediaType>) -> bool {
-    content.iter().any(|(media_type, media_type_response)| {
-        is_json_media_type(media_type)
-            && media_type_response.schema.is_some()
-            && media_type_response.example.is_none()
-    })
+fn payload_schemas_without_example(content: &IndexMap<String, MediaType>) -> Option<Value> {
+    content
+        .iter()
+        .find_map(|(media_type, media_type_response)| {
+            if is_json_media_type(media_type) && media_type_response.example.is_none() {
+                media_type_response
+                    .schema
+                    .as_ref()
+                    .and_then(|schema| serde_json::to_value(schema).ok())
+            } else {
+                None
+            }
+        })
 }
 
-fn needs_example(operation: &Operation) -> bool {
-    let response_schema_without_example =
-        operation
-            .responses
-            .responses
-            .iter()
-            .any(|(status_code, ref_or_item)| {
-                is_success(status_code)
-                    && match ref_or_item {
-                        ReferenceOr::Item(response) => {
-                            payload_schemas_without_example(&response.content)
-                        }
-                        _ => false,
-                    }
-            });
+fn needs_example(operation: &Operation) -> Option<SchemaNeedsExample> {
+    let response_schema_without_example = operation.responses.responses.iter().find_map(
+        |(status_code, ref_or_item)| match ref_or_item {
+            ReferenceOr::Item(response) if is_success(status_code) => {
+                payload_schemas_without_example(&response.content).map(SchemaNeedsExample::response)
+            }
+            _ => None,
+        },
+    );
 
     let request_schema_without_example = match &operation.request_body {
-        Some(ReferenceOr::Item(request)) => payload_schemas_without_example(&request.content),
-        _ => false,
+        Some(ReferenceOr::Item(request)) => {
+            payload_schemas_without_example(&request.content).map(SchemaNeedsExample::request)
+        }
+        _ => None,
     };
 
-    response_schema_without_example || request_schema_without_example
+    response_schema_without_example.or_else(|| request_schema_without_example)
 }
 
-pub(crate) fn need_example(operations: &Vec<(OperationId, &Operation)>) -> HashSet<OperationId> {
-    let mut operation_ids = HashSet::new();
-    for (operation_id, operation) in operations {
-        if needs_example(operation) {
-            operation_ids.insert(operation_id.clone());
+#[derive(Debug)]
+pub(crate) struct SchemaNeedsExample {
+    schema: Value,
+    is_request: bool,
+}
+
+impl SchemaNeedsExample {
+    fn request(schema: Value) -> Self {
+        SchemaNeedsExample {
+            schema,
+            is_request: true,
         }
     }
-    operation_ids
+    fn response(schema: Value) -> Self {
+        SchemaNeedsExample {
+            schema,
+            is_request: false,
+        }
+    }
+}
+
+impl Display for SchemaNeedsExample {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let request_response = if self.is_request {
+            "request"
+        } else {
+            "response"
+        };
+        write!(
+            f,
+            "{} schema needs an example:\n\n{}",
+            request_response,
+            serde_json::to_string_pretty(&self.schema).expect("Cannot serialise JSON")
+        )
+    }
+}
+
+impl std::error::Error for SchemaNeedsExample {}
+
+pub(crate) fn need_example(
+    operations: &Vec<(OperationId, &Operation)>,
+) -> Result<(), IndexMap<OperationId, SchemaNeedsExample>> {
+    let mut operation_ids = IndexMap::new();
+
+    for (operation_id, operation) in operations {
+        if let Some(schema_needs_example) = needs_example(operation) {
+            operation_ids.insert(operation_id.clone(), schema_needs_example);
+        }
+    }
+    if operation_ids.len() == 0 {
+        Ok(())
+    } else {
+        Err(operation_ids)
+    }
 }
 
 #[cfg(test)]

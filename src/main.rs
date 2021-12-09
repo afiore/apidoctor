@@ -30,7 +30,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     if let Err(errors) = outcome.result {
         for (operation_id, errors) in errors {
-            println!("[OPERATION-ID {}]\n", operation_id,);
+            println!("[{}]\n", operation_id,);
             for err in errors {
                 println!("{}", err);
             }

@@ -232,17 +232,6 @@ impl ValidationOutcome {
     }
 }
 
-#[derive(Debug)]
-struct NeedsExample;
-
-impl Display for NeedsExample {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "needs an example")
-    }
-}
-
-impl std::error::Error for NeedsExample {}
-
 pub(crate) fn validate_from_spec(spec: &OpenAPI) -> ValidationOutcome {
     let components = spec
         .components
@@ -250,20 +239,14 @@ pub(crate) fn validate_from_spec(spec: &OpenAPI) -> ValidationOutcome {
         .map(Components::new)
         .unwrap_or_default();
 
-    //TODO: capture the following counts
-    // - path items missing an example (i.e. has "requestBody", success response has schema)
-    // - path items with no description/tags
-
     let mut stats = Stats::default();
     let path_items = clone_items(&spec.paths);
     let mut report: OperationErrors = IndexMap::new();
 
     for (path, path_item) in path_items {
         let operations = operations_for(&path, &path_item);
-        let needing_examples = need_example(&operations);
 
         stats.total_operations += operations.len() as u16;
-        stats.operations_needing_examples += needing_examples.len() as u16;
 
         if let Err(operation_report) = OperationExamples::from_operations(&operations, &components)
         {
@@ -275,11 +258,15 @@ pub(crate) fn validate_from_spec(spec: &OpenAPI) -> ValidationOutcome {
             report.extend(operation_report);
         }
 
-        for operation_id in needing_examples {
-            if let Some(errors) = report.get_mut(&operation_id) {
-                errors.push(NeedsExample.into());
-            } else {
-                report.insert(operation_id, NonEmpty::new(NeedsExample.into()));
+        if let Err(needing_examples) = need_example(&operations) {
+            stats.operations_needing_examples += needing_examples.len() as u16;
+
+            for (operation_id, schema_needing_example) in needing_examples {
+                if let Some(errors) = report.get_mut(&operation_id) {
+                    errors.push(schema_needing_example.into());
+                } else {
+                    report.insert(operation_id, NonEmpty::new(schema_needing_example.into()));
+                }
             }
         }
     }
