@@ -86,7 +86,7 @@ impl Display for ExampleError {
 
 pub(crate) type ErrorReport = IndexMap<OperationId, NonEmpty<ExampleError>>;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 struct ExamplePayload {
     is_request: bool,
     example: Value,
@@ -102,7 +102,9 @@ fn to_reference(value: &Value) -> Option<&str> {
     })
 }
 
-//THIS should be done once and forall when we extract the schemas
+//TODO: refactor as follows:
+// - return a new value instead of mutating input
+// - incrementally expand definitions, so that references are resolved only once
 fn expand_schema_refs(schema: &mut Value, definitions: &IndexMap<String, Value>) {
     match schema {
         Value::Array(items) => {
@@ -164,6 +166,34 @@ impl ExamplePayload {
         })
     }
 
+    fn from_media_type(
+        media_type: &MediaType,
+        schemas: &IndexMap<String, Value>,
+        is_request: bool,
+    ) -> Option<Self> {
+        let example = media_type.example.as_ref()?;
+        let schema_or_ref = media_type.schema.as_ref().map(|x| match x {
+            ReferenceOr::Item(schema) => ReferenceOr::Item(
+                serde_json::to_value(schema)
+                    .expect(&format!("Cannot serialise as JSON: {:?}", schema)),
+            ),
+            ReferenceOr::Reference { reference } => ReferenceOr::Reference {
+                reference: reference.to_owned(),
+            },
+        })?;
+
+        extract_or_resolve(&schemas, &schema_or_ref).map(|schema| {
+            let schema = serde_json::to_value(schema)
+                .expect(&format!("Cannot serialise as JSON: {:?}", schema));
+            ExamplePayload {
+                //TODO: review clone
+                example: example.clone(),
+                schema,
+                is_request,
+            }
+        })
+    }
+
     fn from_media_types(
         media_types: &IndexMap<String, MediaType>,
         schemas: &IndexMap<String, Value>,
@@ -212,46 +242,13 @@ where
     }
 }
 
-impl ExamplePayload {
-    fn from_media_type(
-        media_type: &MediaType,
-        schemas: &IndexMap<String, Value>,
-        is_request: bool,
-    ) -> Option<Self> {
-        let example = media_type.example.as_ref()?;
-        let schema_or_ref = media_type.schema.as_ref().map(|x| match x {
-            ReferenceOr::Item(schema) => ReferenceOr::Item(
-                serde_json::to_value(schema)
-                    .expect(&format!("Cannot serialise as JSON: {:?}", schema)),
-            ),
-            ReferenceOr::Reference { reference } => ReferenceOr::Reference {
-                reference: reference.to_owned(),
-            },
-        })?;
-
-        extract_or_resolve(&schemas, &schema_or_ref).map(|schema| {
-            let schema = serde_json::to_value(schema)
-                .expect(&format!("Cannot serialise as JSON: {:?}", schema));
-            ExamplePayload {
-                //TODO: review clone
-                example: example.clone(),
-                schema,
-                is_request,
-            }
-        })
-    }
-}
-
 #[derive(Debug)]
-pub(crate) struct OperationExamples {
+pub(crate) struct ExamplePayloads {
     operation_id: OperationId,
     examples: NonEmpty<ExamplePayload>,
 }
-impl OperationExamples {
-    pub(crate) fn validate(
-        &self,
-        definitions: &IndexMap<String, Value>,
-    ) -> Result<(), ErrorReport> {
+impl ExamplePayloads {
+    fn validate(&self, definitions: &IndexMap<String, Value>) -> Result<(), ErrorReport> {
         let mut errors = Vec::new();
         for example_playload in &self.examples {
             if let Err(example_error) = example_playload.validate(definitions) {
@@ -268,7 +265,8 @@ impl OperationExamples {
         }
     }
 
-    pub(crate) fn from_operations(
+    //need unit test
+    pub(crate) async fn from_operations(
         operations: &Vec<(OperationId, &Operation)>,
         components: &Components,
     ) -> Result<(), ErrorReport> {
@@ -292,7 +290,7 @@ impl OperationExamples {
         operation_id: &OperationId,
         operation: &openapiv3::Operation,
         components: &Components,
-    ) -> Option<OperationExamples> {
+    ) -> Option<ExamplePayloads> {
         let mut examples: Vec<ExamplePayload> = Vec::new();
 
         for (status_code, ref_or_response) in &operation.responses.responses {
@@ -321,7 +319,7 @@ impl OperationExamples {
             }
         }
 
-        NonEmpty::from_vec(examples).map(|examples| OperationExamples {
+        NonEmpty::from_vec(examples).map(|examples| ExamplePayloads {
             operation_id: operation_id.clone(),
             examples,
         })
@@ -350,26 +348,6 @@ fn payload_schemas_without_example(content: &IndexMap<String, MediaType>) -> Opt
                 None
             }
         })
-}
-
-fn needs_example(operation: &Operation) -> Option<SchemaNeedsExample> {
-    let response_schema_without_example = operation.responses.responses.iter().find_map(
-        |(status_code, ref_or_item)| match ref_or_item {
-            ReferenceOr::Item(response) if is_success(status_code) => {
-                payload_schemas_without_example(&response.content).map(SchemaNeedsExample::response)
-            }
-            _ => None,
-        },
-    );
-
-    let request_schema_without_example = match &operation.request_body {
-        Some(ReferenceOr::Item(request)) => {
-            payload_schemas_without_example(&request.content).map(SchemaNeedsExample::request)
-        }
-        _ => None,
-    };
-
-    response_schema_without_example.or_else(|| request_schema_without_example)
 }
 
 #[derive(Debug)]
@@ -402,7 +380,7 @@ impl Display for SchemaNeedsExample {
         };
         write!(
             f,
-            "{} schema needs an example:\n\n{}",
+            "{} schema needs an example:\n\n{}\n",
             request_response,
             serde_json::to_string_pretty(&self.schema).expect("Cannot serialise JSON")
         )
@@ -411,7 +389,28 @@ impl Display for SchemaNeedsExample {
 
 impl std::error::Error for SchemaNeedsExample {}
 
-pub(crate) fn need_example(
+fn needs_example(operation: &Operation) -> Option<SchemaNeedsExample> {
+    let response_schema_without_example = operation.responses.responses.iter().find_map(
+        |(status_code, ref_or_item)| match ref_or_item {
+            ReferenceOr::Item(response) if is_success(status_code) => {
+                payload_schemas_without_example(&response.content).map(SchemaNeedsExample::response)
+            }
+            _ => None,
+        },
+    );
+
+    let request_schema_without_example = match &operation.request_body {
+        Some(ReferenceOr::Item(request)) => {
+            payload_schemas_without_example(&request.content).map(SchemaNeedsExample::request)
+        }
+        _ => None,
+    };
+
+    response_schema_without_example.or_else(|| request_schema_without_example)
+}
+
+//TODO: add unit test
+pub(crate) async fn need_example(
     operations: &Vec<(OperationId, &Operation)>,
 ) -> Result<(), IndexMap<OperationId, SchemaNeedsExample>> {
     let mut operation_ids = IndexMap::new();
@@ -487,5 +486,51 @@ mod tests {
             schema.pointer("/properties/connections/items"),
             Some(&json!({"type": "string"}))
         )
+    }
+
+    #[test]
+    fn example_payload_from_media_types() {
+        let schema = ReferenceOr::Reference {
+            reference: "#/components/schema/testSchema".to_owned(),
+        };
+
+        let mut schemas = IndexMap::new();
+        schemas.insert("testSchema".to_owned(), json!({"type": "object"}));
+
+        let media_type_no_example = MediaType {
+            schema: Some(schema.clone()),
+            example: None,
+            examples: IndexMap::new(),
+            encoding: IndexMap::new(),
+        };
+
+        let mut media_types = IndexMap::new();
+        media_types.insert("application/json".to_owned(), media_type_no_example);
+
+        assert_eq!(
+            ExamplePayload::from_media_types(&media_types, &schemas, true).len(),
+            0
+        );
+
+        let example_payload = json!("someJsonPayload");
+
+        let media_type_with_example = MediaType {
+            schema: Some(schema.clone()),
+            example: Some(example_payload.clone()),
+            examples: IndexMap::new(),
+            encoding: IndexMap::new(),
+        };
+        media_types.insert(
+            "application/vnd.my.example.api+json".to_owned(),
+            media_type_with_example,
+        );
+        assert_eq!(
+            ExamplePayload::from_media_types(&media_types, &schemas, true),
+            vec![ExamplePayload {
+                is_request: true,
+                example: example_payload.clone(),
+                schema: json!({"type": "object"})
+            }]
+        );
     }
 }

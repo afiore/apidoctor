@@ -5,7 +5,7 @@ use nonempty::NonEmpty;
 use openapiv3::{OpenAPI, Operation, PathItem, ReferenceOr, RequestBody, Response, StatusCode};
 use serde_json::Value;
 
-use crate::examples::{need_example, OperationExamples};
+use crate::examples::{need_example, ExamplePayloads};
 
 #[derive(PartialEq, Clone, Debug, Hash, Eq)]
 enum HttpMethod {
@@ -232,7 +232,7 @@ impl ValidationOutcome {
     }
 }
 
-pub(crate) fn validate_from_spec(spec: &OpenAPI) -> ValidationOutcome {
+pub(crate) async fn validate_from_spec(spec: &OpenAPI) -> ValidationOutcome {
     let components = spec
         .components
         .as_ref()
@@ -251,7 +251,12 @@ pub(crate) fn validate_from_spec(spec: &OpenAPI) -> ValidationOutcome {
 
     stats.total_operations += operations.len() as u16;
 
-    if let Err(operation_report) = OperationExamples::from_operations(&operations, &components) {
+    let (operation_examples_result, needing_example_result) = futures::join!(
+        ExamplePayloads::from_operations(&operations, &components),
+        need_example(&operations)
+    );
+
+    if let Err(operation_report) = operation_examples_result {
         let operation_report: OperationErrors = operation_report
             .into_iter()
             .map(|(op_id, errors)| (op_id.to_owned(), errors.map(|e| e.into())))
@@ -260,7 +265,7 @@ pub(crate) fn validate_from_spec(spec: &OpenAPI) -> ValidationOutcome {
         report.extend(operation_report);
     }
 
-    if let Err(needing_examples) = need_example(&operations) {
+    if let Err(needing_examples) = needing_example_result {
         stats.operations_needing_examples += needing_examples.len() as u16;
 
         for (operation_id, schema_needing_example) in needing_examples {

@@ -1,5 +1,6 @@
 use std::{env, error::Error, path::PathBuf};
 
+use futures::executor;
 use openapiv3::OpenAPI;
 use structopt::StructOpt;
 use thiserror::Error;
@@ -24,7 +25,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let cmd = Cmd::from_iter(env::args());
     let spec = std::fs::read_to_string(&cmd.spec)?;
     let spec: OpenAPI = serde_json::from_str(&spec)?;
-    let outcome = openapi::validate_from_spec(&spec);
+    let outcome = executor::block_on(openapi::validate_from_spec(&spec));
 
     println!("stats: {:?}", outcome.stats);
 
