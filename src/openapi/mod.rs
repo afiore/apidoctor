@@ -58,7 +58,7 @@ fn operation_for<'s>(
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub(crate) struct OperationId(String);
+pub(crate) struct OperationId(pub(crate) String);
 
 impl Display for OperationId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

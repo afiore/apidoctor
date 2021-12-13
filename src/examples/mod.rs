@@ -350,7 +350,7 @@ fn payload_schemas_without_example(content: &IndexMap<String, MediaType>) -> Opt
         })
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub(crate) struct SchemaNeedsExample {
     schema: Value,
     is_request: bool,
@@ -409,7 +409,6 @@ fn needs_example(operation: &Operation) -> Option<SchemaNeedsExample> {
     response_schema_without_example.or_else(|| request_schema_without_example)
 }
 
-//TODO: add unit test
 pub(crate) async fn need_example(
     operations: &Vec<(OperationId, &Operation)>,
 ) -> Result<(), IndexMap<OperationId, SchemaNeedsExample>> {
@@ -430,6 +429,7 @@ pub(crate) async fn need_example(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openapiv3::{RequestBody, Response, Responses, Schema, StatusCode};
     use serde_json::json;
 
     #[test]
@@ -529,5 +529,87 @@ mod tests {
                 schema: json!({"type": "object"})
             }]
         );
+    }
+
+    fn test_operation(is_request: bool, schema: Schema, example: Option<Value>) -> Operation {
+        let mut operation = Operation {
+            tags: vec![],
+            summary: None,
+            description: None,
+            external_docs: None,
+            operation_id: Some("test-operation".to_owned()),
+            parameters: vec![],
+            request_body: None,
+            responses: Responses {
+                default: None,
+                responses: IndexMap::new(),
+            },
+            deprecated: false,
+            security: None,
+            servers: vec![],
+            extensions: IndexMap::new(),
+        };
+
+        let mut content = IndexMap::new();
+
+        let media_type = MediaType {
+            example,
+            examples: IndexMap::new(),
+            encoding: IndexMap::new(),
+            schema: Some(ReferenceOr::Item(schema)),
+        };
+
+        content.insert("application/json".to_owned(), media_type);
+
+        if is_request {
+            operation.request_body = Some(ReferenceOr::Item(RequestBody {
+                description: None,
+                content,
+                required: true,
+                extensions: IndexMap::new(),
+            }));
+        } else {
+            let mut responses = IndexMap::new();
+            responses.insert(
+                StatusCode::Code(201),
+                ReferenceOr::Item(Response {
+                    description: "test response".to_owned(),
+                    headers: IndexMap::new(),
+                    content,
+                    links: IndexMap::new(),
+                    extensions: IndexMap::new(),
+                }),
+            );
+            operation.responses.responses = responses;
+        }
+        operation
+    }
+
+    #[test]
+    fn operation_needs_request_example_test() {
+        let schema_value = json!({"type": "object"});
+        let schema: Schema = serde_json::from_value(schema_value.clone()).expect("a schema");
+        let operation = test_operation(true, schema.clone(), None);
+
+        assert_eq!(
+            needs_example(&operation),
+            Some(SchemaNeedsExample {
+                schema: schema_value.clone(),
+                is_request: true
+            })
+        );
+
+        let operation = test_operation(false, schema.clone(), None);
+
+        assert_eq!(
+            needs_example(&operation),
+            Some(SchemaNeedsExample {
+                schema: schema_value.clone(),
+                is_request: false
+            })
+        );
+
+        let operation = test_operation(false, schema.clone(), Some(json!({"some-object": true})));
+        assert_eq!(needs_example(&operation), None);
     }
 }
