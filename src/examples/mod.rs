@@ -374,9 +374,9 @@ impl SchemaNeedsExample {
 impl Display for SchemaNeedsExample {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let request_response = if self.is_request {
-            "request"
+            "Request"
         } else {
-            "response"
+            "Response"
         };
         write!(
             f,
@@ -431,9 +431,6 @@ pub(crate) async fn need_example(
 mod tests {
     use super::*;
     use serde_json::json;
-
-    //TODO: for integration tests
-    // let data = include_str!("../petstore.json");
 
     #[test]
     fn test_is_json_media_type() {

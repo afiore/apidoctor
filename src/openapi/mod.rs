@@ -198,6 +198,7 @@ pub(crate) fn clone_items<T: Clone>(
 pub(crate) struct Stats {
     total_operations: u16,
     operations_needing_examples: u16,
+    operations_with_invalid_examples: u16,
 }
 
 impl Default for Stats {
@@ -205,7 +206,31 @@ impl Default for Stats {
         Self {
             total_operations: Default::default(),
             operations_needing_examples: Default::default(),
+            operations_with_invalid_examples: Default::default(),
         }
+    }
+}
+
+impl Display for Stats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "API Stats\n")?;
+        writeln!(
+            f,
+            "{:<15}: {:>3}",
+            "Total operations", self.total_operations
+        )?;
+        writeln!(
+            f,
+            "{:<15}: {:>3}",
+            "Needing examples", self.operations_needing_examples
+        )?;
+        writeln!(
+            f,
+            "{:<15}: {:>3}",
+            "Invalid examples", self.operations_with_invalid_examples
+        )?;
+
+        Ok(())
     }
 }
 
@@ -261,6 +286,8 @@ pub(crate) async fn validate_from_spec(spec: &OpenAPI) -> ValidationOutcome {
             .into_iter()
             .map(|(op_id, errors)| (op_id.to_owned(), errors.map(|e| e.into())))
             .collect();
+
+        stats.operations_with_invalid_examples += operation_report.len() as u16;
 
         report.extend(operation_report);
     }

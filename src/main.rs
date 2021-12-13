@@ -27,13 +27,21 @@ fn main() -> Result<(), Box<dyn Error>> {
     let spec: OpenAPI = serde_json::from_str(&spec)?;
     let outcome = executor::block_on(openapi::validate_from_spec(&spec));
 
-    println!("stats: {:?}", outcome.stats);
+    println!("{}", outcome.stats);
 
     if let Err(errors) = outcome.result {
-        for (operation_id, errors) in errors {
-            println!("[{}]\n", operation_id,);
+        for (i, (operation_id, errors)) in errors.iter().enumerate() {
+            let s = if errors.len() > 0 { "s" } else { "" };
+            println!(
+                "{:0>3}. {:<60} {:>2} issue{}:\n",
+                i + 1,
+                format!("{}", operation_id),
+                errors.len(),
+                s,
+            );
+
             for err in errors {
-                println!("{}", err);
+                println!("* {}", err);
             }
         }
         Err(CmdError::ValidationFailed.into())
