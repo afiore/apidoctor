@@ -12,7 +12,7 @@ openapiv3 = "0.5"
 openssl = {version = "0.10", features = ["vendored"]}
 jsonschema = "0.13"
 serde_json = "1.0"
-#serde_yaml = "0.8"
+serde_yaml = "0.8"
 indexmap = "1.7"
 nonempty = "0.7.0"
 mime = "0.3"

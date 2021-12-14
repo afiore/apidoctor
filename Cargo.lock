@@ -45,6 +45,7 @@ dependencies = [
  "openssl",
  "regex",
  "serde_json",
+ "serde_yaml",
  "structopt",
  "thiserror",
 ]

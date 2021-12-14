@@ -1,4 +1,10 @@
-use std::{env, error::Error, path::PathBuf};
+use std::{
+    env,
+    error::Error,
+    fs::File,
+    io::BufReader,
+    path::{Path, PathBuf},
+};
 
 use futures::executor;
 use openapiv3::OpenAPI;
@@ -11,6 +17,7 @@ mod openapi;
 #[derive(Debug, StructOpt)]
 #[structopt(name = "apidoctor", about = "An API spec linter")]
 struct Cmd {
+    /// path to JSON or YAML spec
     #[structopt(parse(from_os_str))]
     spec: PathBuf,
 }
@@ -21,10 +28,21 @@ pub enum CmdError {
     ValidationFailed,
 }
 
+fn spec_from_file<P: AsRef<Path>>(path: P) -> Result<OpenAPI, Box<dyn Error>> {
+    let file = File::open(path.as_ref())?;
+    let reader = BufReader::new(file);
+    let extension = path.as_ref().extension().and_then(|ext| ext.to_str());
+
+    if let Some("yml") | Some("yaml") = extension {
+        serde_yaml::from_reader(reader).map_err(Into::into)
+    } else {
+        serde_json::from_reader(reader).map_err(Into::into)
+    }
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let cmd = Cmd::from_iter(env::args());
-    let spec = std::fs::read_to_string(&cmd.spec)?;
-    let spec: OpenAPI = serde_json::from_str(&spec)?;
+    let spec: OpenAPI = spec_from_file(&cmd.spec)?;
     let outcome = executor::block_on(openapi::validate_from_spec(&spec));
 
     println!("{}", outcome.stats);
