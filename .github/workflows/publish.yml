@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 jobs:
   Publish:
-          if: github.ref == 'refs/heads/main' || startsWith(github.ref,'refs/heads/release/')
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref,'refs/heads/release/')
     runs-on: ubuntu-latest
     env:
       github_run_id: ${{ github.run_id }}
