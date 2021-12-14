@@ -1,0 +1,47 @@
+name: Publish
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  Publish:
+          if: github.ref == 'refs/heads/main' || startsWith(github.ref,'refs/heads/release/')
+    runs-on: ubuntu-latest
+    env:
+      github_run_id: ${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v1
+
+      #- name: Login to Docker Hub
+      #  uses: docker/login-action@v1
+      #  with:
+      #    username: ${{ secrets.DOCKER_HUB_USERNAME }}
+      #    password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
+
+      - name: Install build dependencies
+        run: sudo apt-get install libssl-dev musl-tools
+
+      - name: Install stable Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: "x86_64-unknown-linux-musl"
+
+      - name: Build release artefact
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --target x86_64-unknown-linux-musl --release
+
+      - name: Build and push Docker image
+        id: docker_build
+        uses: docker/build-push-action@v2
+        with:
+          context: ./
+          file: ./Dockerfile
+          push: false
+          tags: |
+            afiore/cikit:${{ github.run_id }}
+            afiore/cikit:latest
+
+      - name: Image digest
+        run: echo ${{ steps.docker_build.outputs.digest }}
