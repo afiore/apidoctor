@@ -40,8 +40,8 @@ jobs:
           file: ./Dockerfile
           push: true
           tags: |
-            afiore/cikit:${{ github.run_id }}
-            afiore/cikit:latest
+            afiore/apidoctor:${{ github.run_id }}
+            afiore/apidoctor:latest
 
       - name: Image digest
         run: echo ${{ steps.docker_build.outputs.digest }}
