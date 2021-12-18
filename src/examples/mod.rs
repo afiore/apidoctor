@@ -38,6 +38,8 @@ pub(crate) enum AppError {
     ValidationFailed(NonEmpty<ValidationError>),
     #[error("Unexpected error. Couldn't compile JSON schema")]
     InvalidSchema,
+    #[error("Could not find operation_id {}", 0)]
+    OperationNotFound(OperationId),
 }
 
 #[derive(Debug)]

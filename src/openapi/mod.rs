@@ -266,24 +266,13 @@ impl Display for Stats {
 type OperationErrors = IndexMap<OperationId, NonEmpty<Box<dyn Error>>>;
 
 #[derive(Debug)]
-pub(crate) struct LintingOutcome {
-    pub stats: Stats,
-    pub result: Result<(), OperationErrors>,
-}
-
-impl LintingOutcome {
-    fn ok(stats: Stats) -> Self {
-        LintingOutcome {
-            stats,
-            result: Ok(()),
-        }
-    }
-    fn error(stats: Stats, report: OperationErrors) -> Self {
-        LintingOutcome {
-            stats,
-            result: Err(report),
-        }
-    }
+pub(crate) enum LintingOutcome {
+    AllGood(Stats),
+    IssuesFound {
+        stats: Stats,
+        report: OperationErrors,
+    },
+    OperationNotFound(OperationId),
 }
 
 pub(crate) async fn lint(
@@ -351,9 +340,9 @@ pub(crate) async fn lint(
         }
     }
 
-    if report.len() == 0 {
-        LintingOutcome::ok(stats)
-    } else {
-        LintingOutcome::error(stats, report)
+    match (&operation_id, report.len()) {
+        (Some(operation_id), 0) => LintingOutcome::OperationNotFound(operation_id.to_owned()),
+        (_, 0) => LintingOutcome::AllGood(stats),
+        _ => LintingOutcome::IssuesFound { stats, report },
     }
 }

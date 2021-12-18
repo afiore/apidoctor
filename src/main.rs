@@ -1,14 +1,15 @@
 use std::{env, error::Error, fmt::Display, path::PathBuf, str::FromStr};
 
+use examples::AppError;
 use futures::executor;
-use openapi::OperationId;
+use openapi::{LintingOutcome, OperationId};
 use structopt::StructOpt;
 use thiserror::Error;
 
 mod examples;
 mod openapi;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Hash, PartialEq)]
 struct Tag(String);
 
 #[derive(Debug)]
@@ -58,25 +59,29 @@ fn main() -> Result<(), Box<dyn Error>> {
     let spec = openapi::spec_from_file(&cmd.spec)?;
     let outcome = executor::block_on(openapi::lint(&spec, cmd.tags, cmd.operation_id));
 
-    println!("{}", outcome.stats);
-
-    if let Err(errors) = outcome.result {
-        for (i, (operation_id, errors)) in errors.iter().enumerate() {
-            let s = if errors.len() > 1 { "s" } else { "" };
-            println!(
-                "{:0>3}. {:<60} {:>2} issue{}:\n",
-                i + 1,
-                format!("{}", operation_id),
-                errors.len(),
-                s,
-            );
-
-            for err in errors {
-                println!("* {}", err);
-            }
+    match outcome {
+        LintingOutcome::OperationNotFound(operation_id) => {
+            Err(AppError::OperationNotFound(operation_id).into())
         }
-        Err(CmdError::ValidationFailed.into())
-    } else {
-        Ok(())
+
+        LintingOutcome::AllGood(stats) => Ok(println!("{}", stats)),
+        LintingOutcome::IssuesFound { stats, report } => {
+            println!("{}", stats);
+            for (i, (operation_id, errors)) in report.iter().enumerate() {
+                let s = if errors.len() > 1 { "s" } else { "" };
+                println!(
+                    "{:0>3}. {:<60} {:>2} issue{}:\n",
+                    i + 1,
+                    format!("{}", operation_id),
+                    errors.len(),
+                    s,
+                );
+
+                for err in errors {
+                    println!("* {}", err);
+                }
+            }
+            Err(CmdError::ValidationFailed.into())
+        }
     }
 }
