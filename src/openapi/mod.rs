@@ -1,11 +1,17 @@
-use std::{error::Error, fmt::Display};
+use std::{
+    convert::Infallible, error::Error, fmt::Display, fs::File, io::BufReader, path::Path,
+    str::FromStr,
+};
 
 use indexmap::IndexMap;
 use nonempty::NonEmpty;
 use openapiv3::{OpenAPI, Operation, PathItem, ReferenceOr, RequestBody, Response, StatusCode};
 use serde_json::Value;
 
-use crate::examples::{need_example, ExamplePayloads};
+use crate::{
+    examples::{need_example, ExamplePayloads},
+    Tag,
+};
 
 #[derive(PartialEq, Clone, Debug, Hash, Eq)]
 enum HttpMethod {
@@ -66,11 +72,22 @@ impl Display for OperationId {
     }
 }
 
+impl FromStr for OperationId {
+    type Err = Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(OperationId(s.to_owned()))
+    }
+}
+
 impl TryFrom<&Operation> for OperationId {
     type Error = ();
 
     fn try_from(op: &Operation) -> Result<Self, Self::Error> {
-        op.operation_id.clone().map(|id| OperationId(id)).ok_or(())
+        op.operation_id
+            .as_ref()
+            .map(|id| OperationId(id.to_owned()))
+            .ok_or(())
     }
 }
 
@@ -112,6 +129,18 @@ pub(crate) fn operations_for<'s>(
             })
         })
         .collect()
+}
+
+pub(crate) fn spec_from_file<P: AsRef<Path>>(path: P) -> Result<OpenAPI, Box<dyn Error>> {
+    let file = File::open(path.as_ref())?;
+    let reader = BufReader::new(file);
+    let extension = path.as_ref().extension().and_then(|ext| ext.to_str());
+
+    if let Some("yml") | Some("yaml") = extension {
+        serde_yaml::from_reader(reader).map_err(Into::into)
+    } else {
+        serde_json::from_reader(reader).map_err(Into::into)
+    }
 }
 
 pub(crate) fn is_success(code: &StatusCode) -> bool {
@@ -237,27 +266,31 @@ impl Display for Stats {
 type OperationErrors = IndexMap<OperationId, NonEmpty<Box<dyn Error>>>;
 
 #[derive(Debug)]
-pub(crate) struct ValidationOutcome {
+pub(crate) struct LintingOutcome {
     pub stats: Stats,
     pub result: Result<(), OperationErrors>,
 }
 
-impl ValidationOutcome {
+impl LintingOutcome {
     fn ok(stats: Stats) -> Self {
-        ValidationOutcome {
+        LintingOutcome {
             stats,
             result: Ok(()),
         }
     }
     fn error(stats: Stats, report: OperationErrors) -> Self {
-        ValidationOutcome {
+        LintingOutcome {
             stats,
             result: Err(report),
         }
     }
 }
 
-pub(crate) async fn validate_from_spec(spec: &OpenAPI) -> ValidationOutcome {
+pub(crate) async fn lint(
+    spec: &OpenAPI,
+    tags: Vec<Tag>,
+    operation_id: Option<OperationId>,
+) -> LintingOutcome {
     let components = spec
         .components
         .as_ref()
@@ -269,9 +302,23 @@ pub(crate) async fn validate_from_spec(spec: &OpenAPI) -> ValidationOutcome {
 
     let path_items = clone_items(&spec.paths);
 
+    let cli_filter: Box<dyn Fn(&Operation) -> bool> = match (&operation_id, &tags) {
+        (Some(operation_id), _) => Box::new(|operation: &Operation| {
+            operation.operation_id == Some(format!("{}", operation_id.clone()))
+        }),
+        (_, tags) => Box::new(|operation: &Operation| {
+            if tags.len() == 0 {
+                true
+            } else {
+                tags.iter().any(|tag| operation.tags.contains(&tag.0))
+            }
+        }),
+    };
+
     let operations: Vec<(OperationId, &Operation)> = path_items
         .iter()
         .flat_map(|(path, path_item)| operations_for(path, path_item))
+        .filter(|(_, operation)| cli_filter(operation))
         .collect();
 
     stats.total_operations += operations.len() as u16;
@@ -305,8 +352,8 @@ pub(crate) async fn validate_from_spec(spec: &OpenAPI) -> ValidationOutcome {
     }
 
     if report.len() == 0 {
-        ValidationOutcome::ok(stats)
+        LintingOutcome::ok(stats)
     } else {
-        ValidationOutcome::error(stats, report)
+        LintingOutcome::error(stats, report)
     }
 }
