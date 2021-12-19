@@ -6,11 +6,19 @@ use openapi::{LintingOutcome, OperationId};
 use structopt::StructOpt;
 use thiserror::Error;
 
+use crate::openapi::LintingIssues;
+
 mod examples;
 mod openapi;
 
 #[derive(Debug, Clone, Hash, PartialEq)]
 struct Tag(String);
+
+impl Display for Tag {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 #[derive(Debug)]
 struct InvalidTagError(pub String);
@@ -26,7 +34,7 @@ impl FromStr for Tag {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s1 = s.to_owned();
-        if s.chars().all(|c| c.is_alphanumeric()) {
+        if s.chars().all(|c| c.is_alphanumeric() || c == ' ') {
             Ok(Tag(s1))
         } else {
             Err(InvalidTagError(s1))
@@ -65,19 +73,27 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
 
         LintingOutcome::AllGood(stats) => Ok(println!("{}", stats)),
-        LintingOutcome::IssuesFound { stats, report } => {
+        LintingOutcome::IssuesFound {
+            stats,
+            operation_linting_issues,
+        } => {
             println!("{}", stats);
-            for (i, (operation_id, errors)) in report.iter().enumerate() {
-                let s = if errors.len() > 1 { "s" } else { "" };
+            for (i, (operation_id, LintingIssues { tags, issues })) in
+                operation_linting_issues.iter().enumerate()
+            {
+                let s = if issues.len() > 1 { "s" } else { "" };
+                let tags: Vec<String> = tags.into_iter().map(ToString::to_string).collect();
+
                 println!(
-                    "{:0>3}. {:<60} {:>2} issue{}:\n",
+                    "{:0>3}. {:<25} tags: {:<35} {:>2} issue{}:\n",
                     i + 1,
                     format!("{}", operation_id),
-                    errors.len(),
+                    tags.join(", "),
+                    issues.len(),
                     s,
                 );
 
-                for err in errors {
+                for err in issues {
                     println!("* {}", err);
                 }
             }

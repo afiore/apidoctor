@@ -263,14 +263,20 @@ impl Display for Stats {
     }
 }
 
-type OperationErrors = IndexMap<OperationId, NonEmpty<Box<dyn Error>>>;
+#[derive(Debug)]
+pub(crate) struct LintingIssues {
+    pub tags: Vec<Tag>,
+    pub issues: NonEmpty<Box<dyn Error>>,
+}
+
+type OperationLintingIssues = IndexMap<OperationId, LintingIssues>;
 
 #[derive(Debug)]
 pub(crate) enum LintingOutcome {
     AllGood(Stats),
     IssuesFound {
         stats: Stats,
-        report: OperationErrors,
+        operation_linting_issues: OperationLintingIssues,
     },
     OperationNotFound(OperationId),
 }
@@ -287,7 +293,7 @@ pub(crate) async fn lint(
         .unwrap_or_default();
 
     let mut stats = Stats::default();
-    let mut report = IndexMap::new();
+    let mut operation_linting_issues = IndexMap::new();
 
     let path_items = clone_items(&spec.paths);
 
@@ -310,6 +316,12 @@ pub(crate) async fn lint(
         .filter(|(_, operation)| cli_filter(operation))
         .collect();
 
+    let mut operation_tags: IndexMap<OperationId, Vec<Tag>> = IndexMap::new();
+    for (operation_id, operation) in operations.iter() {
+        let tags = operation.tags.iter().map(|s| Tag(s.clone())).collect();
+        operation_tags.insert(operation_id.to_owned(), tags);
+    }
+
     stats.total_operations += operations.len() as u16;
 
     let (operation_examples_result, needing_example_result) = futures::join!(
@@ -318,31 +330,55 @@ pub(crate) async fn lint(
     );
 
     if let Err(operation_report) = operation_examples_result {
-        let operation_report: OperationErrors = operation_report
+        let operation_report: OperationLintingIssues = operation_report
             .into_iter()
-            .map(|(op_id, errors)| (op_id.to_owned(), errors.map(|e| e.into())))
+            .map(|(op_id, errors)| {
+                let issues: NonEmpty<Box<dyn Error>> = errors.map(|e| e.into());
+
+                let tags = operation_tags
+                    .get(&op_id)
+                    .map(Clone::clone)
+                    .unwrap_or_default();
+
+                let issues = LintingIssues { tags, issues };
+                (op_id.to_owned(), issues)
+            })
             .collect();
 
         stats.operations_with_invalid_examples += operation_report.len() as u16;
 
-        report.extend(operation_report);
+        operation_linting_issues.extend(operation_report);
     }
 
     if let Err(needing_examples) = needing_example_result {
         stats.operations_needing_examples += needing_examples.len() as u16;
 
         for (operation_id, schema_needing_example) in needing_examples {
-            if let Some(errors) = report.get_mut(&operation_id) {
-                errors.push(schema_needing_example.into());
+            if let Some(LintingIssues { tags: _, issues }) =
+                operation_linting_issues.get_mut(&operation_id)
+            {
+                issues.push(schema_needing_example.into());
             } else {
-                report.insert(operation_id, NonEmpty::new(schema_needing_example.into()));
+                let tags = operation_tags
+                    .get(&operation_id)
+                    .map(Clone::clone)
+                    .unwrap_or_default();
+
+                let linting_issues = LintingIssues {
+                    tags,
+                    issues: NonEmpty::new(schema_needing_example.into()),
+                };
+                operation_linting_issues.insert(operation_id, linting_issues);
             }
         }
     }
 
-    match (&operation_id, report.len()) {
+    match (&operation_id, operation_linting_issues.len()) {
         (Some(operation_id), 0) => LintingOutcome::OperationNotFound(operation_id.to_owned()),
         (_, 0) => LintingOutcome::AllGood(stats),
-        _ => LintingOutcome::IssuesFound { stats, report },
+        _ => LintingOutcome::IssuesFound {
+            stats,
+            operation_linting_issues,
+        },
     }
 }
