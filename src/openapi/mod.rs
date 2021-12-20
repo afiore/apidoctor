@@ -149,7 +149,11 @@ pub(crate) fn is_success(code: &StatusCode) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use super::*;
+    use tempdir::TempDir;
+
     #[test]
     fn test_operation_id() {
         assert_eq!(
@@ -166,6 +170,46 @@ mod tests {
             OperationId::for_method_and_path(&HttpMethod::POST, &""),
             OperationId("post".to_owned())
         );
+    }
+
+    fn spec_file_roundtrip<F: Fn(&OpenAPI) -> String>(
+        dir: &TempDir,
+        spec: &OpenAPI,
+        filename: &str,
+        serialize: F,
+    ) {
+        let file_path = dir.path().join(filename);
+        let file_path = file_path.as_path();
+        let mut spec_file = File::create(file_path).unwrap();
+        spec_file.write_all(serialize(spec).as_bytes()).unwrap();
+
+        if let Ok(parsed_spec) = spec_from_file(file_path) {
+            assert_eq!(&parsed_spec, spec);
+        } else {
+            panic!("spec file expected");
+        }
+    }
+
+    #[test]
+    fn test_spec_from_yaml() {
+        let spec = OpenAPI::default();
+        let dir = TempDir::new("apidoctor").unwrap();
+        let serialize = |spec: &OpenAPI| serde_yaml::to_string(spec).unwrap();
+
+        let file_names = vec!["spec.yaml", "spec.yml"];
+
+        for file_name in file_names {
+            spec_file_roundtrip(&dir, &spec, file_name, serialize);
+        }
+    }
+
+    #[test]
+    fn test_spec_from_json() {
+        let spec = OpenAPI::default();
+        let dir = TempDir::new("apidoctor").unwrap();
+        let serialize = |spec: &OpenAPI| serde_json::to_string(spec).unwrap();
+
+        spec_file_roundtrip(&dir, &spec, "spec.json", serialize);
     }
 }
 

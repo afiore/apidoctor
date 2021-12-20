@@ -1,4 +1,4 @@
-use std::{env, error::Error, fmt::Display, path::PathBuf, str::FromStr};
+use std::{convert::Infallible, env, error::Error, fmt::Display, path::PathBuf, str::FromStr};
 
 use examples::AppError;
 use futures::executor;
@@ -20,25 +20,11 @@ impl Display for Tag {
     }
 }
 
-#[derive(Debug)]
-struct InvalidTagError(pub String);
-
-impl Display for InvalidTagError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "'{}' contains non-alphanumeric characters", self.0)
-    }
-}
-
 impl FromStr for Tag {
-    type Err = InvalidTagError;
+    type Err = Infallible;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let s1 = s.to_owned();
-        if s.chars().all(|c| c.is_alphanumeric() || c == ' ') {
-            Ok(Tag(s1))
-        } else {
-            Err(InvalidTagError(s1))
-        }
+        Ok(Tag(s.to_owned()))
     }
 }
 
