@@ -115,6 +115,77 @@ impl OperationId {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct OperationWithId {
+    pub id: OperationId,
+    pub operation: Operation,
+}
+
+struct OperationIterator {
+    path_items: Vec<(String, PathItem)>,
+    current_item_operations: Option<NonEmpty<OperationWithId>>,
+    current_item: usize,
+}
+
+impl OperationIterator {
+    fn new(path_items: Vec<(String, PathItem)>) -> Self {
+        OperationIterator {
+            path_items,
+            current_item_operations: None,
+            current_item: 0,
+        }
+    }
+}
+
+impl Iterator for OperationIterator {
+    type Item = OperationWithId;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        //we have iterated over all the path items, nothing else to do
+        if self.current_item > self.path_items.len() {
+            None
+        } else {
+            //if there's some operations for the current PathItem,
+            if let Some(current_item_ops) = self.current_item_operations.take() {
+                //set current item operations to the operations' tail
+                self.current_item_operations = NonEmpty::from_vec(current_item_ops.tail);
+
+                Some(current_item_ops.head)
+            } else {
+                let mut next_op = None;
+
+                loop {
+                    if &self.current_item >= &self.path_items.len() {
+                        break;
+                    }
+
+                    let (path, path_item) = &self.path_items[self.current_item];
+                    self.current_item += 1;
+
+                    let operations: Option<NonEmpty<OperationWithId>> = NonEmpty::from_vec(
+                        operations_for(&path, &path_item)
+                            .into_iter()
+                            .map(|(id, operation)| OperationWithId {
+                                id,
+                                operation: operation.to_owned(),
+                            })
+                            .collect(),
+                    );
+
+                    if let Some(operations) = operations {
+                        self.current_item_operations = NonEmpty::from_vec(operations.tail);
+                        next_op = Some(operations.head);
+                        break;
+                    }
+                }
+
+                next_op
+            }
+        }
+    }
+}
+
+//TODO: turn into a private function and return `OperationWithId`
 pub(crate) fn operations_for<'s>(
     path: &str,
     path_item: &'s openapiv3::PathItem,
@@ -145,72 +216,6 @@ pub(crate) fn spec_from_file<P: AsRef<Path>>(path: P) -> Result<OpenAPI, Box<dyn
 
 pub(crate) fn is_success(code: &StatusCode) -> bool {
     format!("{}", code).starts_with("2")
-}
-
-#[cfg(test)]
-mod tests {
-    use std::io::Write;
-
-    use super::*;
-    use tempdir::TempDir;
-
-    #[test]
-    fn test_operation_id() {
-        assert_eq!(
-            OperationId::for_method_and_path(&HttpMethod::PUT, &"/some/resource"),
-            OperationId("putSomeResource".to_owned())
-        );
-
-        assert_eq!(
-            OperationId::for_method_and_path(&HttpMethod::GET, &"thing"),
-            OperationId("getThing".to_owned())
-        );
-
-        assert_eq!(
-            OperationId::for_method_and_path(&HttpMethod::POST, &""),
-            OperationId("post".to_owned())
-        );
-    }
-
-    fn spec_file_roundtrip<F: Fn(&OpenAPI) -> String>(
-        dir: &TempDir,
-        spec: &OpenAPI,
-        filename: &str,
-        serialize: F,
-    ) {
-        let file_path = dir.path().join(filename);
-        let file_path = file_path.as_path();
-        let mut spec_file = File::create(file_path).unwrap();
-        spec_file.write_all(serialize(spec).as_bytes()).unwrap();
-
-        if let Ok(parsed_spec) = spec_from_file(file_path) {
-            assert_eq!(&parsed_spec, spec);
-        } else {
-            panic!("spec file expected");
-        }
-    }
-
-    #[test]
-    fn test_spec_from_yaml() {
-        let spec = OpenAPI::default();
-        let dir = TempDir::new("apidoctor").unwrap();
-        let serialize = |spec: &OpenAPI| serde_yaml::to_string(spec).unwrap();
-
-        let file_names = vec!["spec.yaml", "spec.yml"];
-
-        for file_name in file_names {
-            spec_file_roundtrip(&dir, &spec, file_name, serialize);
-        }
-    }
-
-    #[test]
-    fn test_spec_from_json() {
-        let spec = OpenAPI::default();
-        let dir = TempDir::new("apidoctor").unwrap();
-        let serialize = |spec: &OpenAPI| serde_json::to_string(spec).unwrap();
-
-        spec_file_roundtrip(&dir, &spec, "spec.json", serialize);
-    }
 }
 
 #[derive(Debug)]
@@ -339,7 +344,7 @@ pub(crate) async fn lint(
     let mut stats = Stats::default();
     let mut operation_linting_issues = IndexMap::new();
 
-    let path_items = clone_items(&spec.paths);
+    let path_items: Vec<(String, PathItem)> = clone_items(&spec.paths).into_iter().collect();
 
     let cli_filter: Box<dyn Fn(&Operation) -> bool> = match (&operation_id, &tags) {
         (Some(operation_id), _) => Box::new(|operation: &Operation| {
@@ -354,19 +359,25 @@ pub(crate) async fn lint(
         }),
     };
 
-    let operations: Vec<(OperationId, &Operation)> = path_items
-        .iter()
-        .flat_map(|(path, path_item)| operations_for(path, path_item))
-        .filter(|(_, operation)| cli_filter(operation))
+    let mut operation_tags: IndexMap<OperationId, Vec<Tag>> = IndexMap::new();
+
+    let operations: Vec<OperationWithId> = OperationIterator::new(path_items).collect();
+    stats.total_operations += operations.len() as u16;
+
+    let operations: Vec<OperationWithId> = operations
+        .into_iter()
+        .filter(|op| cli_filter(&op.operation))
         .collect();
 
-    let mut operation_tags: IndexMap<OperationId, Vec<Tag>> = IndexMap::new();
-    for (operation_id, operation) in operations.iter() {
-        let tags = operation.tags.iter().map(|s| Tag(s.clone())).collect();
-        operation_tags.insert(operation_id.to_owned(), tags);
+    //shortcut with OperationNotFound if supplied filter yields no result
+    if let (Some(operation_id), 0) = (operation_id.clone(), operations.len()) {
+        return LintingOutcome::OperationNotFound(operation_id);
     }
 
-    stats.total_operations += operations.len() as u16;
+    for OperationWithId { id, operation } in operations.iter() {
+        let tags = operation.tags.iter().map(|s| Tag(s.clone())).collect();
+        operation_tags.insert(id.to_owned(), tags);
+    }
 
     let (operation_examples_result, needing_example_result) = futures::join!(
         ExamplePayloads::from_operations(&operations, &components),
@@ -417,12 +428,161 @@ pub(crate) async fn lint(
         }
     }
 
-    match (&operation_id, operation_linting_issues.len()) {
-        (Some(operation_id), 0) => LintingOutcome::OperationNotFound(operation_id.to_owned()),
-        (_, 0) => LintingOutcome::AllGood(stats),
-        _ => LintingOutcome::IssuesFound {
+    if operation_linting_issues.len() == 0 {
+        LintingOutcome::AllGood(stats)
+    } else {
+        LintingOutcome::IssuesFound {
             stats,
             operation_linting_issues,
-        },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use super::*;
+    use tempdir::TempDir;
+
+    #[test]
+    fn operation_id_for_method_and_path() {
+        assert_eq!(
+            OperationId::for_method_and_path(&HttpMethod::PUT, &"/some/resource"),
+            OperationId("putSomeResource".to_owned())
+        );
+
+        assert_eq!(
+            OperationId::for_method_and_path(&HttpMethod::GET, &"thing"),
+            OperationId("getThing".to_owned())
+        );
+
+        assert_eq!(
+            OperationId::for_method_and_path(&HttpMethod::POST, &""),
+            OperationId("post".to_owned())
+        );
+    }
+
+    fn test_operation(id: String) -> openapiv3::Operation {
+        let mut operation = openapiv3::Operation::default();
+        operation.operation_id = Some(id);
+        operation
+    }
+
+    fn built_path_item(update: impl FnOnce(&mut PathItem)) -> PathItem {
+        let mut path_item = PathItem::default();
+        update(&mut path_item);
+        path_item
+    }
+
+    fn spec_file_roundtrip<F: Fn(&OpenAPI) -> String>(
+        dir: &TempDir,
+        spec: &OpenAPI,
+        filename: &str,
+        serialize: F,
+    ) {
+        let file_path = dir.path().join(filename);
+        let file_path = file_path.as_path();
+        let mut spec_file = File::create(file_path).unwrap();
+        spec_file.write_all(serialize(spec).as_bytes()).unwrap();
+
+        if let Ok(parsed_spec) = spec_from_file(file_path) {
+            assert_eq!(&parsed_spec, spec);
+        } else {
+            panic!("spec file expected");
+        }
+    }
+
+    #[test]
+    fn test_spec_from_yaml() {
+        let spec = OpenAPI::default();
+        let dir = TempDir::new("apidoctor").unwrap();
+        let serialize = |spec: &OpenAPI| serde_yaml::to_string(spec).unwrap();
+
+        let file_names = vec!["spec.yaml", "spec.yml"];
+
+        for file_name in file_names {
+            spec_file_roundtrip(&dir, &spec, file_name, serialize);
+        }
+    }
+
+    #[test]
+    fn test_spec_from_json() {
+        let spec = OpenAPI::default();
+        let dir = TempDir::new("apidoctor").unwrap();
+        let serialize = |spec: &OpenAPI| serde_json::to_string(spec).unwrap();
+
+        spec_file_roundtrip(&dir, &spec, "spec.json", serialize);
+    }
+
+    #[test]
+    fn operations_iterator() {
+        let path_items = vec![
+            (
+                "a".to_owned(),
+                built_path_item(|pi| {
+                    pi.get = Some(test_operation("getA".to_owned()));
+                    pi.delete = Some(test_operation("deleteA".to_owned()));
+                    pi.post = Some(test_operation("postA".to_owned()));
+                }),
+            ),
+            ("a1".to_owned(), built_path_item(|_| {})),
+            (
+                "b".to_owned(),
+                built_path_item(|pi| {
+                    pi.get = Some(test_operation("getB".to_owned()));
+                }),
+            ),
+            ("c".to_owned(), built_path_item(|_| {})),
+        ];
+
+        let operation_ids: Vec<String> = OperationIterator::new(path_items)
+            .map(|op| op.id.to_string())
+            .collect();
+
+        assert_eq!(operation_ids, vec!["getA", "postA", "deleteA", "getB"])
+    }
+
+    #[test]
+    fn lint_fails_on_unknown_operation_id() {
+        let operation_id = OperationId("unknown".to_owned());
+
+        if let LintingOutcome::OperationNotFound(op_id) = futures::executor::block_on(lint(
+            &OpenAPI::default(),
+            vec![],
+            Some(operation_id.clone()),
+        )) {
+            assert_eq!(&op_id, &operation_id)
+        } else {
+            panic!("LintingOutcome::OperationNotFound expected!")
+        }
+    }
+
+    #[test]
+    fn lint_finds_a_given_operation_id() {
+        let op_id = "example";
+        let operation_id = OperationId(op_id.to_owned());
+
+        let mut spec = OpenAPI::default();
+        let path1 = built_path_item(|pi| {
+            pi.get = Some(test_operation("other".to_owned()));
+        });
+        let path2 = built_path_item(|pi| {
+            pi.post = Some(test_operation(op_id.to_owned()));
+        });
+
+        spec.paths
+            .insert("/path/1".to_owned(), ReferenceOr::Item(path1));
+
+        spec.paths
+            .insert("/path/2".to_owned(), ReferenceOr::Item(path2));
+
+        if let LintingOutcome::AllGood(stats) =
+            futures::executor::block_on(lint(&spec, vec![], Some(operation_id.clone())))
+        {
+            assert_eq!(stats.total_operations, 2);
+        } else {
+            panic!("LintingOutcome::AllGood expected!")
+        }
     }
 }

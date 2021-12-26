@@ -5,6 +5,7 @@ use std::io;
 use crate::openapi::is_success;
 use crate::openapi::Components;
 use crate::openapi::OperationId;
+use crate::openapi::OperationWithId;
 use indexmap::IndexMap;
 use jsonschema::JSONSchema;
 use nonempty::NonEmpty;
@@ -267,15 +268,14 @@ impl ExamplePayloads {
         }
     }
 
-    //need unit test
     pub(crate) async fn from_operations(
-        operations: &Vec<(OperationId, &Operation)>,
+        operations: &Vec<OperationWithId>,
         components: &Components,
     ) -> Result<(), ErrorReport> {
         let mut report = IndexMap::new();
 
-        for (operation_id, operation) in operations {
-            if let Some(examples) = Self::from_operation(operation_id, operation, &components) {
+        for op in operations.iter() {
+            if let Some(examples) = Self::from_operation(&op.id, &op.operation, &components) {
                 if let Err(operation_report) = examples.validate(&components.schemas) {
                     report.extend(operation_report);
                 }
@@ -412,13 +412,13 @@ fn needs_example(operation: &Operation) -> Option<SchemaNeedsExample> {
 }
 
 pub(crate) async fn need_example(
-    operations: &Vec<(OperationId, &Operation)>,
+    operations: &Vec<OperationWithId>,
 ) -> Result<(), IndexMap<OperationId, SchemaNeedsExample>> {
     let mut operation_ids = IndexMap::new();
 
-    for (operation_id, operation) in operations {
-        if let Some(schema_needs_example) = needs_example(operation) {
-            operation_ids.insert(operation_id.clone(), schema_needs_example);
+    for op in operations.iter() {
+        if let Some(schema_needs_example) = needs_example(&op.operation) {
+            operation_ids.insert(op.id.clone(), schema_needs_example);
         }
     }
     if operation_ids.len() == 0 {
