@@ -11,7 +11,7 @@ use crate::openapi::LintingIssues;
 mod examples;
 mod openapi;
 
-#[derive(Debug, Clone, Hash, PartialEq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct Tag(String);
 
 impl Display for Tag {
@@ -64,16 +64,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             operation_linting_issues,
         } => {
             println!("{}", stats);
-            for (i, (operation_id, LintingIssues { tags, issues })) in
+            for (i, (context, LintingIssues { issues })) in
                 operation_linting_issues.iter().enumerate()
             {
                 let s = if issues.len() > 1 { "s" } else { "" };
-                let tags: Vec<String> = tags.into_iter().map(ToString::to_string).collect();
+                let tags: Vec<String> = context.tags.iter().map(ToString::to_string).collect();
 
                 println!(
-                    "{:0>3}. {:<25} tags: {:<35} {:>2} issue{}:\n",
+                    "{:0>3}. {:<40} tags: {:<35} {:>2} issue{}:\n",
                     i + 1,
-                    format!("{}", operation_id),
+                    format!("{}", context.id),
                     tags.join(", "),
                     issues.len(),
                     s,

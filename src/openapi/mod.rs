@@ -14,7 +14,7 @@ use crate::{
 };
 
 #[derive(PartialEq, Clone, Debug, Hash, Eq)]
-enum HttpMethod {
+pub(crate) enum HttpMethod {
     GET,
     POST,
     PUT,
@@ -64,6 +64,7 @@ fn operation_for<'s>(
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
+
 pub(crate) struct OperationId(pub(crate) String);
 
 impl Display for OperationId {
@@ -115,15 +116,23 @@ impl OperationId {
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct OperationWithId {
+#[derive(Debug, Hash, Clone, PartialEq, Eq)]
+pub(crate) struct OperationContext {
     pub id: OperationId,
+    pub method: HttpMethod,
+    pub path: String,
+    pub tags: Vec<Tag>,
+}
+
+#[derive(Debug)]
+pub(crate) struct OperationWithContext {
+    pub context: OperationContext,
     pub operation: Operation,
 }
 
 struct OperationIterator {
     path_items: Vec<(String, PathItem)>,
-    current_item_operations: Option<NonEmpty<OperationWithId>>,
+    current_item_operations: Option<NonEmpty<OperationWithContext>>,
     current_item: usize,
 }
 
@@ -138,7 +147,7 @@ impl OperationIterator {
 }
 
 impl Iterator for OperationIterator {
-    type Item = OperationWithId;
+    type Item = OperationWithContext;
 
     fn next(&mut self) -> Option<Self::Item> {
         //we have iterated over all the path items, nothing else to do
@@ -162,11 +171,11 @@ impl Iterator for OperationIterator {
                     let (path, path_item) = &self.path_items[self.current_item];
                     self.current_item += 1;
 
-                    let operations: Option<NonEmpty<OperationWithId>> = NonEmpty::from_vec(
+                    let operations: Option<NonEmpty<OperationWithContext>> = NonEmpty::from_vec(
                         operations_for(&path, &path_item)
                             .into_iter()
-                            .map(|(id, operation)| OperationWithId {
-                                id,
+                            .map(|(context, operation)| OperationWithContext {
+                                context,
                                 operation: operation.to_owned(),
                             })
                             .collect(),
@@ -185,18 +194,24 @@ impl Iterator for OperationIterator {
     }
 }
 
-//TODO: turn into a private function and return `OperationWithId`
-pub(crate) fn operations_for<'s>(
+fn operations_for<'s>(
     path: &str,
     path_item: &'s openapiv3::PathItem,
-) -> Vec<(OperationId, &'s openapiv3::Operation)> {
+) -> Vec<(OperationContext, &'s openapiv3::Operation)> {
     HttpMethod::all()
         .iter()
         .filter_map(|method| {
             operation_for(method, path_item).map(|operation| {
-                let operation_id = OperationId::try_from(operation)
+                let id = OperationId::try_from(operation)
                     .unwrap_or_else(|_| OperationId::for_method_and_path(method, path));
-                (operation_id, operation)
+                let tags = operation.tags.iter().map(|s| Tag(s.to_owned())).collect();
+                let context = OperationContext {
+                    id,
+                    tags,
+                    method: method.to_owned(),
+                    path: path.to_owned(),
+                };
+                (context, operation)
             })
         })
         .collect()
@@ -218,21 +233,11 @@ pub(crate) fn is_success(code: &StatusCode) -> bool {
     format!("{}", code).starts_with("2")
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct Components {
     pub schemas: IndexMap<String, Value>,
     pub responses: IndexMap<String, Response>,
     pub requests: IndexMap<String, RequestBody>,
-}
-
-impl Default for Components {
-    fn default() -> Self {
-        Self {
-            schemas: Default::default(),
-            responses: Default::default(),
-            requests: Default::default(),
-        }
-    }
 }
 
 impl Components {
@@ -272,21 +277,12 @@ pub(crate) fn clone_items<T: Clone>(
     values_by_key
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct Stats {
     total_operations: u16,
+    matching_filters: u16,
     operations_needing_examples: u16,
     operations_with_invalid_examples: u16,
-}
-
-impl Default for Stats {
-    fn default() -> Self {
-        Self {
-            total_operations: Default::default(),
-            operations_needing_examples: Default::default(),
-            operations_with_invalid_examples: Default::default(),
-        }
-    }
 }
 
 impl Display for Stats {
@@ -296,6 +292,11 @@ impl Display for Stats {
             f,
             "{:<15}: {:>3}",
             "Total operations", self.total_operations
+        )?;
+        writeln!(
+            f,
+            "{:<15}: {:>3}",
+            "Matching filters", self.matching_filters
         )?;
         writeln!(
             f,
@@ -314,11 +315,11 @@ impl Display for Stats {
 
 #[derive(Debug)]
 pub(crate) struct LintingIssues {
-    pub tags: Vec<Tag>,
+    //TODO: replace box in favour of an enum
     pub issues: NonEmpty<Box<dyn Error>>,
 }
 
-type OperationLintingIssues = IndexMap<OperationId, LintingIssues>;
+type OperationLintingIssues = IndexMap<OperationContext, LintingIssues>;
 
 #[derive(Debug)]
 pub(crate) enum LintingOutcome {
@@ -348,7 +349,7 @@ pub(crate) async fn lint(
 
     let cli_filter: Box<dyn Fn(&Operation) -> bool> = match (&operation_id, &tags) {
         (Some(operation_id), _) => Box::new(|operation: &Operation| {
-            operation.operation_id == Some(format!("{}", operation_id.clone()))
+            operation.operation_id == Some(operation_id.to_string())
         }),
         (_, tags) => Box::new(|operation: &Operation| {
             if tags.len() == 0 {
@@ -359,24 +360,19 @@ pub(crate) async fn lint(
         }),
     };
 
-    let mut operation_tags: IndexMap<OperationId, Vec<Tag>> = IndexMap::new();
+    let operations: Vec<OperationWithContext> = OperationIterator::new(path_items).collect();
+    stats.total_operations = operations.len() as u16;
 
-    let operations: Vec<OperationWithId> = OperationIterator::new(path_items).collect();
-    stats.total_operations += operations.len() as u16;
-
-    let operations: Vec<OperationWithId> = operations
+    let operations: Vec<OperationWithContext> = operations
         .into_iter()
         .filter(|op| cli_filter(&op.operation))
         .collect();
 
+    stats.matching_filters = operations.len() as u16;
+
     //shortcut with OperationNotFound if supplied filter yields no result
     if let (Some(operation_id), 0) = (operation_id.clone(), operations.len()) {
         return LintingOutcome::OperationNotFound(operation_id);
-    }
-
-    for OperationWithId { id, operation } in operations.iter() {
-        let tags = operation.tags.iter().map(|s| Tag(s.clone())).collect();
-        operation_tags.insert(id.to_owned(), tags);
     }
 
     let (operation_examples_result, needing_example_result) = futures::join!(
@@ -390,12 +386,7 @@ pub(crate) async fn lint(
             .map(|(op_id, errors)| {
                 let issues: NonEmpty<Box<dyn Error>> = errors.map(|e| e.into());
 
-                let tags = operation_tags
-                    .get(&op_id)
-                    .map(Clone::clone)
-                    .unwrap_or_default();
-
-                let issues = LintingIssues { tags, issues };
+                let issues = LintingIssues { issues };
                 (op_id.to_owned(), issues)
             })
             .collect();
@@ -409,18 +400,11 @@ pub(crate) async fn lint(
         stats.operations_needing_examples += needing_examples.len() as u16;
 
         for (operation_id, schema_needing_example) in needing_examples {
-            if let Some(LintingIssues { tags: _, issues }) =
-                operation_linting_issues.get_mut(&operation_id)
+            if let Some(LintingIssues { issues }) = operation_linting_issues.get_mut(&operation_id)
             {
                 issues.push(schema_needing_example.into());
             } else {
-                let tags = operation_tags
-                    .get(&operation_id)
-                    .map(Clone::clone)
-                    .unwrap_or_default();
-
                 let linting_issues = LintingIssues {
-                    tags,
                     issues: NonEmpty::new(schema_needing_example.into()),
                 };
                 operation_linting_issues.insert(operation_id, linting_issues);
@@ -537,7 +521,7 @@ mod tests {
         ];
 
         let operation_ids: Vec<String> = OperationIterator::new(path_items)
-            .map(|op| op.id.to_string())
+            .map(|op| op.context.id.to_string())
             .collect();
 
         assert_eq!(operation_ids, vec!["getA", "postA", "deleteA", "getB"])

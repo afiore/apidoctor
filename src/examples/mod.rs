@@ -4,8 +4,9 @@ use std::io;
 
 use crate::openapi::is_success;
 use crate::openapi::Components;
+use crate::openapi::OperationContext;
 use crate::openapi::OperationId;
-use crate::openapi::OperationWithId;
+use crate::openapi::OperationWithContext;
 use indexmap::IndexMap;
 use jsonschema::JSONSchema;
 use nonempty::NonEmpty;
@@ -87,7 +88,7 @@ impl Display for ExampleError {
     }
 }
 
-pub(crate) type ErrorReport = IndexMap<OperationId, NonEmpty<ExampleError>>;
+pub(crate) type ErrorReport = IndexMap<OperationContext, NonEmpty<ExampleError>>;
 
 #[derive(Debug, PartialEq)]
 struct ExamplePayload {
@@ -247,7 +248,7 @@ where
 
 #[derive(Debug)]
 pub(crate) struct ExamplePayloads {
-    operation_id: OperationId,
+    context: OperationContext,
     examples: NonEmpty<ExamplePayload>,
 }
 impl ExamplePayloads {
@@ -262,20 +263,20 @@ impl ExamplePayloads {
             None => Ok(()),
             Some(errors) => {
                 let mut report = IndexMap::new();
-                report.insert(self.operation_id.clone(), errors);
+                report.insert(self.context.clone(), errors);
                 Err(report)
             }
         }
     }
 
     pub(crate) async fn from_operations(
-        operations: &Vec<OperationWithId>,
+        operations: &Vec<OperationWithContext>,
         components: &Components,
     ) -> Result<(), ErrorReport> {
         let mut report = IndexMap::new();
 
         for op in operations.iter() {
-            if let Some(examples) = Self::from_operation(&op.id, &op.operation, &components) {
+            if let Some(examples) = Self::from_operation(&op.context, &op.operation, &components) {
                 if let Err(operation_report) = examples.validate(&components.schemas) {
                     report.extend(operation_report);
                 }
@@ -289,7 +290,7 @@ impl ExamplePayloads {
     }
 
     fn from_operation(
-        operation_id: &OperationId,
+        context: &OperationContext,
         operation: &openapiv3::Operation,
         components: &Components,
     ) -> Option<ExamplePayloads> {
@@ -322,7 +323,7 @@ impl ExamplePayloads {
         }
 
         NonEmpty::from_vec(examples).map(|examples| ExamplePayloads {
-            operation_id: operation_id.clone(),
+            context: context.clone(),
             examples,
         })
     }
@@ -412,19 +413,19 @@ fn needs_example(operation: &Operation) -> Option<SchemaNeedsExample> {
 }
 
 pub(crate) async fn need_example(
-    operations: &Vec<OperationWithId>,
-) -> Result<(), IndexMap<OperationId, SchemaNeedsExample>> {
-    let mut operation_ids = IndexMap::new();
+    operations: &Vec<OperationWithContext>,
+) -> Result<(), IndexMap<OperationContext, SchemaNeedsExample>> {
+    let mut operation_errors = IndexMap::new();
 
     for op in operations.iter() {
         if let Some(schema_needs_example) = needs_example(&op.operation) {
-            operation_ids.insert(op.id.clone(), schema_needs_example);
+            operation_errors.insert(op.context.clone(), schema_needs_example);
         }
     }
-    if operation_ids.len() == 0 {
+    if operation_errors.len() == 0 {
         Ok(())
     } else {
-        Err(operation_ids)
+        Err(operation_errors)
     }
 }
 
