@@ -3,10 +3,8 @@ use std::fmt::Display;
 use std::io;
 
 use crate::openapi::is_success;
+use crate::openapi::operations::*;
 use crate::openapi::Components;
-use crate::openapi::OperationContext;
-use crate::openapi::OperationId;
-use crate::openapi::OperationWithContext;
 use indexmap::IndexMap;
 use jsonschema::JSONSchema;
 use nonempty::NonEmpty;

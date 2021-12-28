@@ -2,11 +2,11 @@ use std::{convert::Infallible, env, error::Error, fmt::Display, path::PathBuf, s
 
 use examples::AppError;
 use futures::executor;
-use openapi::{LintingOutcome, OperationId};
+use openapi::operations::OperationId;
 use structopt::StructOpt;
 use thiserror::Error;
 
-use crate::openapi::LintingIssues;
+use crate::openapi::linting::{lint, LintingIssues, LintingOutcome};
 
 mod examples;
 mod openapi;
@@ -51,7 +51,7 @@ pub enum CmdError {
 fn main() -> Result<(), Box<dyn Error>> {
     let cmd = Cmd::from_iter(env::args());
     let spec = openapi::spec_from_file(&cmd.spec)?;
-    let outcome = executor::block_on(openapi::lint(&spec, cmd.tags, cmd.operation_id));
+    let outcome = executor::block_on(lint(&spec, cmd.tags, cmd.operation_id));
 
     match outcome {
         LintingOutcome::OperationNotFound(operation_id) => {
