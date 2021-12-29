@@ -1,160 +1,37 @@
-use std::{error::Error, fmt::Display};
+pub mod linting;
+pub mod operations;
+
+use std::{fs::File, io::BufReader, path::Path};
 
 use indexmap::IndexMap;
-use nonempty::NonEmpty;
-use openapiv3::{OpenAPI, Operation, PathItem, ReferenceOr, RequestBody, Response, StatusCode};
+
+use openapiv3::{OpenAPI, ReferenceOr, RequestBody, Response, StatusCode};
 use serde_json::Value;
 
-use crate::examples::{need_example, ExamplePayloads};
+use crate::AppError;
 
-#[derive(PartialEq, Clone, Debug, Hash, Eq)]
-enum HttpMethod {
-    GET,
-    POST,
-    PUT,
-    DELETE,
-    PATCH,
-    HEAD,
-    OPTIONS,
-    TRACE,
-}
+pub(crate) fn spec_from_file<P: AsRef<Path>>(path: P) -> Result<OpenAPI, AppError> {
+    let file = File::open(path.as_ref())?;
+    let reader = BufReader::new(file);
+    let extension = path.as_ref().extension().and_then(|ext| ext.to_str());
 
-impl Display for HttpMethod {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = format!("{:?}", self);
-        write!(f, "{}", s.to_lowercase())
-    }
-}
-
-impl HttpMethod {
-    fn all() -> Vec<HttpMethod> {
-        vec![
-            HttpMethod::GET,
-            HttpMethod::POST,
-            HttpMethod::PUT,
-            HttpMethod::DELETE,
-            HttpMethod::PATCH,
-            HttpMethod::HEAD,
-            HttpMethod::OPTIONS,
-            HttpMethod::TRACE,
-        ]
-    }
-}
-
-fn operation_for<'s>(
-    method: &HttpMethod,
-    path_item: &'s PathItem,
-) -> Option<&'s openapiv3::Operation> {
-    match method {
-        HttpMethod::GET => path_item.get.as_ref(),
-        HttpMethod::POST => path_item.post.as_ref(),
-        HttpMethod::PUT => path_item.put.as_ref(),
-        HttpMethod::DELETE => path_item.delete.as_ref(),
-        HttpMethod::HEAD => path_item.head.as_ref(),
-        HttpMethod::PATCH => path_item.patch.as_ref(),
-        HttpMethod::OPTIONS => path_item.options.as_ref(),
-        HttpMethod::TRACE => path_item.trace.as_ref(),
-    }
-}
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub(crate) struct OperationId(pub(crate) String);
-
-impl Display for OperationId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl TryFrom<&Operation> for OperationId {
-    type Error = ();
-
-    fn try_from(op: &Operation) -> Result<Self, Self::Error> {
-        op.operation_id.clone().map(|id| OperationId(id)).ok_or(())
-    }
-}
-
-fn capitalize(s: &str) -> String {
-    let mut done = false;
-    s.chars()
-        .map(|c| {
-            if done {
-                c
-            } else {
-                done = true;
-                c.to_ascii_uppercase()
-            }
-        })
-        .collect()
-}
-fn camelize(path: &str) -> String {
-    path.split_terminator('/').map(|s| capitalize(s)).collect()
-}
-
-impl OperationId {
-    fn for_method_and_path(method: &HttpMethod, path: &str) -> Self {
-        let id = format!("{}{}", method, camelize(path));
-        OperationId(id)
-    }
-}
-
-pub(crate) fn operations_for<'s>(
-    path: &str,
-    path_item: &'s openapiv3::PathItem,
-) -> Vec<(OperationId, &'s openapiv3::Operation)> {
-    HttpMethod::all()
-        .iter()
-        .filter_map(|method| {
-            operation_for(method, path_item).map(|operation| {
-                let operation_id = OperationId::try_from(operation)
-                    .unwrap_or_else(|_| OperationId::for_method_and_path(method, path));
-                (operation_id, operation)
-            })
-        })
-        .collect()
+    let spec = if let Some("yml") | Some("yaml") = extension {
+        serde_yaml::from_reader(reader)?
+    } else {
+        serde_json::from_reader(reader)?
+    };
+    Ok(spec)
 }
 
 pub(crate) fn is_success(code: &StatusCode) -> bool {
     format!("{}", code).starts_with("2")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn test_operation_id() {
-        assert_eq!(
-            OperationId::for_method_and_path(&HttpMethod::PUT, &"/some/resource"),
-            OperationId("putSomeResource".to_owned())
-        );
-
-        assert_eq!(
-            OperationId::for_method_and_path(&HttpMethod::GET, &"thing"),
-            OperationId("getThing".to_owned())
-        );
-
-        assert_eq!(
-            OperationId::for_method_and_path(&HttpMethod::POST, &""),
-            OperationId("post".to_owned())
-        );
-    }
-}
-
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct Components {
     pub schemas: IndexMap<String, Value>,
     pub responses: IndexMap<String, Response>,
     pub requests: IndexMap<String, RequestBody>,
-}
-
-impl Default for Components {
-    fn default() -> Self {
-        Self {
-            schemas: Default::default(),
-            responses: Default::default(),
-            requests: Default::default(),
-        }
-    }
 }
 
 impl Components {
@@ -194,119 +71,153 @@ pub(crate) fn clone_items<T: Clone>(
     values_by_key
 }
 
-#[derive(Debug)]
-pub(crate) struct Stats {
-    total_operations: u16,
-    operations_needing_examples: u16,
-    operations_with_invalid_examples: u16,
-}
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
 
-impl Default for Stats {
-    fn default() -> Self {
-        Self {
-            total_operations: Default::default(),
-            operations_needing_examples: Default::default(),
-            operations_with_invalid_examples: Default::default(),
+    use super::linting::*;
+    use super::operations::*;
+    use crate::openapi::*;
+    use openapiv3::PathItem;
+    use tempdir::TempDir;
+
+    #[test]
+    fn operation_id_for_method_and_path() {
+        assert_eq!(
+            OperationId::for_method_and_path(&HttpMethod::PUT, &"/some/resource"),
+            OperationId("putSomeResource".to_owned())
+        );
+
+        assert_eq!(
+            OperationId::for_method_and_path(&HttpMethod::GET, &"thing"),
+            OperationId("getThing".to_owned())
+        );
+
+        assert_eq!(
+            OperationId::for_method_and_path(&HttpMethod::POST, &""),
+            OperationId("post".to_owned())
+        );
+    }
+
+    fn test_operation(id: String) -> openapiv3::Operation {
+        let mut operation = openapiv3::Operation::default();
+        operation.operation_id = Some(id);
+        operation
+    }
+
+    fn built_path_item(update: impl FnOnce(&mut PathItem)) -> PathItem {
+        let mut path_item = PathItem::default();
+        update(&mut path_item);
+        path_item
+    }
+
+    fn spec_file_roundtrip<F: Fn(&OpenAPI) -> String>(
+        dir: &TempDir,
+        spec: &OpenAPI,
+        filename: &str,
+        serialize: F,
+    ) {
+        let file_path = dir.path().join(filename);
+        let file_path = file_path.as_path();
+        let mut spec_file = File::create(file_path).unwrap();
+        spec_file.write_all(serialize(spec).as_bytes()).unwrap();
+
+        if let Ok(parsed_spec) = spec_from_file(file_path) {
+            assert_eq!(&parsed_spec, spec);
+        } else {
+            panic!("spec file expected");
         }
     }
-}
 
-impl Display for Stats {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "API Stats\n")?;
-        writeln!(
-            f,
-            "{:<15}: {:>3}",
-            "Total operations", self.total_operations
-        )?;
-        writeln!(
-            f,
-            "{:<15}: {:>3}",
-            "Needing examples", self.operations_needing_examples
-        )?;
-        writeln!(
-            f,
-            "{:<15}: {:>3}",
-            "Invalid examples", self.operations_with_invalid_examples
-        )?;
+    #[test]
+    fn test_spec_from_yaml() {
+        let spec = OpenAPI::default();
+        let dir = TempDir::new("apidoctor").unwrap();
+        let serialize = |spec: &OpenAPI| serde_yaml::to_string(spec).unwrap();
 
-        Ok(())
-    }
-}
+        let file_names = vec!["spec.yaml", "spec.yml"];
 
-type OperationErrors = IndexMap<OperationId, NonEmpty<Box<dyn Error>>>;
-
-#[derive(Debug)]
-pub(crate) struct ValidationOutcome {
-    pub stats: Stats,
-    pub result: Result<(), OperationErrors>,
-}
-
-impl ValidationOutcome {
-    fn ok(stats: Stats) -> Self {
-        ValidationOutcome {
-            stats,
-            result: Ok(()),
+        for file_name in file_names {
+            spec_file_roundtrip(&dir, &spec, file_name, serialize);
         }
     }
-    fn error(stats: Stats, report: OperationErrors) -> Self {
-        ValidationOutcome {
-            stats,
-            result: Err(report),
-        }
+
+    #[test]
+    fn test_spec_from_json() {
+        let spec = OpenAPI::default();
+        let dir = TempDir::new("apidoctor").unwrap();
+        let serialize = |spec: &OpenAPI| serde_json::to_string(spec).unwrap();
+
+        spec_file_roundtrip(&dir, &spec, "spec.json", serialize);
     }
-}
 
-pub(crate) async fn validate_from_spec(spec: &OpenAPI) -> ValidationOutcome {
-    let components = spec
-        .components
-        .as_ref()
-        .map(Components::new)
-        .unwrap_or_default();
+    #[test]
+    fn operations_iterator() {
+        let path_items = vec![
+            (
+                "a".to_owned(),
+                built_path_item(|pi| {
+                    pi.get = Some(test_operation("getA".to_owned()));
+                    pi.delete = Some(test_operation("deleteA".to_owned()));
+                    pi.post = Some(test_operation("postA".to_owned()));
+                }),
+            ),
+            ("a1".to_owned(), built_path_item(|_| {})),
+            (
+                "b".to_owned(),
+                built_path_item(|pi| {
+                    pi.get = Some(test_operation("getB".to_owned()));
+                }),
+            ),
+            ("c".to_owned(), built_path_item(|_| {})),
+        ];
 
-    let mut stats = Stats::default();
-    let mut report = IndexMap::new();
-
-    let path_items = clone_items(&spec.paths);
-
-    let operations: Vec<(OperationId, &Operation)> = path_items
-        .iter()
-        .flat_map(|(path, path_item)| operations_for(path, path_item))
-        .collect();
-
-    stats.total_operations += operations.len() as u16;
-
-    let (operation_examples_result, needing_example_result) = futures::join!(
-        ExamplePayloads::from_operations(&operations, &components),
-        need_example(&operations)
-    );
-
-    if let Err(operation_report) = operation_examples_result {
-        let operation_report: OperationErrors = operation_report
-            .into_iter()
-            .map(|(op_id, errors)| (op_id.to_owned(), errors.map(|e| e.into())))
+        let operation_ids: Vec<String> = OperationIterator::new(path_items)
+            .map(|op| op.context.id.to_string())
             .collect();
 
-        stats.operations_with_invalid_examples += operation_report.len() as u16;
-
-        report.extend(operation_report);
+        assert_eq!(operation_ids, vec!["getA", "postA", "deleteA", "getB"])
     }
+    #[test]
+    fn lint_fails_on_unknown_operation_id() {
+        let operation_id = OperationId("unknown".to_owned());
 
-    if let Err(needing_examples) = needing_example_result {
-        stats.operations_needing_examples += needing_examples.len() as u16;
-
-        for (operation_id, schema_needing_example) in needing_examples {
-            if let Some(errors) = report.get_mut(&operation_id) {
-                errors.push(schema_needing_example.into());
-            } else {
-                report.insert(operation_id, NonEmpty::new(schema_needing_example.into()));
-            }
+        if let LintingOutcome::OperationNotFound(op_id) = futures::executor::block_on(lint(
+            &OpenAPI::default(),
+            vec![],
+            Some(operation_id.clone()),
+        )) {
+            assert_eq!(&op_id, &operation_id)
+        } else {
+            panic!("LintingOutcome::OperationNotFound expected!")
         }
     }
 
-    if report.len() == 0 {
-        ValidationOutcome::ok(stats)
-    } else {
-        ValidationOutcome::error(stats, report)
+    #[test]
+    fn lint_finds_a_given_operation_id() {
+        let op_id = "example";
+        let operation_id = OperationId(op_id.to_owned());
+
+        let mut spec = OpenAPI::default();
+        let path1 = built_path_item(|pi| {
+            pi.get = Some(test_operation("other".to_owned()));
+        });
+        let path2 = built_path_item(|pi| {
+            pi.post = Some(test_operation(op_id.to_owned()));
+        });
+
+        spec.paths
+            .insert("/path/1".to_owned(), ReferenceOr::Item(path1));
+
+        spec.paths
+            .insert("/path/2".to_owned(), ReferenceOr::Item(path2));
+
+        if let LintingOutcome::AllGood(stats) =
+            futures::executor::block_on(lint(&spec, vec![], Some(operation_id.clone())))
+        {
+            assert_eq!(stats.total_operations, 2);
+        } else {
+            panic!("LintingOutcome::AllGood expected!")
+        }
     }
 }

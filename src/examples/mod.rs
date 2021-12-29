@@ -1,10 +1,9 @@
 use std::error::Error;
 use std::fmt::Display;
-use std::io;
 
 use crate::openapi::is_success;
+use crate::openapi::operations::*;
 use crate::openapi::Components;
-use crate::openapi::OperationId;
 use indexmap::IndexMap;
 use jsonschema::JSONSchema;
 use nonempty::NonEmpty;
@@ -14,30 +13,9 @@ use openapiv3::ReferenceOr;
 use serde_json::Value;
 
 #[derive(Debug)]
-pub(crate) struct ValidationError {
-    message: String,
-}
-
-impl<'a> From<jsonschema::ValidationError<'a>> for ValidationError {
-    fn from(err: jsonschema::ValidationError<'a>) -> Self {
-        ValidationError {
-            message: format!("{}", err),
-        }
-    }
-}
-
-#[derive(thiserror::Error, Debug)]
-pub(crate) enum AppError {
-    #[error(
-        "Could not deserialise the supplied spec file. Is it a valid, json-encoded, OpenAPI spec?"
-    )]
-    DeserializeationError(#[from] serde_json::Error),
-    #[error("Could not find spec file")]
-    SpecFileNotFound(#[from] io::Error),
-    #[error("Schema validation failed for some examples")]
-    ValidationFailed(NonEmpty<ValidationError>),
-    #[error("Unexpected error. Couldn't compile JSON schema")]
-    InvalidSchema,
+pub(crate) enum ExampleErrorKind {
+    UnparsableSchema,
+    SchemaValidationFailed { validation_errors: NonEmpty<String> },
 }
 
 #[derive(Debug)]
@@ -45,7 +23,7 @@ pub struct ExampleError {
     is_request: bool,
     example: Value,
     schema: Value,
-    error: AppError,
+    kind: ExampleErrorKind,
 }
 
 impl Error for ExampleError {}
@@ -55,16 +33,16 @@ impl Display for ExampleError {
         let snippet = serde_json::to_string_pretty(&self.example)
             .expect("failed to serialise example to JSON");
 
-        let errors = match &self.error {
-            AppError::ValidationFailed(validation_errs) => {
+        let errors = match &self.kind {
+            ExampleErrorKind::SchemaValidationFailed { validation_errors } => {
                 let mut s = String::new();
-                for err in validation_errs {
-                    s.push_str(&format!(" - {}\n", err.message))
+                for err in validation_errors {
+                    s.push_str(&format!(" - {}\n", err))
                 }
                 s
             }
 
-            _ => format!("{}", &self.error),
+            ExampleErrorKind::UnparsableSchema => "unparsable schema".to_owned(),
         };
 
         let request_response = if self.is_request {
@@ -84,7 +62,7 @@ impl Display for ExampleError {
     }
 }
 
-pub(crate) type ErrorReport = IndexMap<OperationId, NonEmpty<ExampleError>>;
+pub(crate) type ErrorReport = IndexMap<OperationContext, NonEmpty<ExampleError>>;
 
 #[derive(Debug, PartialEq)]
 struct ExamplePayload {
@@ -102,66 +80,56 @@ fn to_reference(value: &Value) -> Option<&str> {
     })
 }
 
-//TODO: refactor as follows:
-// - return a new value instead of mutating input
-// - incrementally expand definitions, so that references are resolved only once
-fn expand_schema_refs(schema: &mut Value, definitions: &IndexMap<String, Value>) {
+fn expand_schema_refs(schema: &Value, definitions: &IndexMap<String, Value>) -> Value {
     match schema {
         Value::Array(items) => {
-            for item in items {
-                expand_schema_refs(item, definitions);
-            }
+            let items = items
+                .iter()
+                .map(|item| expand_schema_refs(&item, definitions))
+                .collect();
+            Value::Array(items)
         }
-        //TODO: is there a way to avoid calling to_reference twice?
-        obj if to_reference(schema).is_some() => {
+        obj @ Value::Object(props) => {
             if let Some(reference) = to_reference(obj) {
                 let reference = strip_component_prefix(reference);
                 let definition = definitions
                     .get(&reference)
                     .expect(&format!("expected to find reference: {}", &reference));
 
-                //a reference can contain other references
-                let mut definition = definition.clone();
-                expand_schema_refs(&mut definition, definitions);
-                *obj = definition;
+                expand_schema_refs(&definition, definitions)
+            } else {
+                Value::Object(
+                    props
+                        .iter()
+                        .map(|(k, v)| (k.to_owned(), expand_schema_refs(&v, definitions)))
+                        .collect(),
+                )
             }
         }
-        Value::Object(props) => {
-            for (_, value) in props {
-                expand_schema_refs(value, definitions);
-            }
-        }
-        _ => (),
+        _ => schema.clone(),
     }
 }
 
 impl ExamplePayload {
     fn validate(&self, definitions: &IndexMap<String, Value>) -> Result<(), ExampleError> {
-        let mut schema = self.schema.clone();
-        expand_schema_refs(&mut schema, definitions);
+        let schema = expand_schema_refs(&self.schema, definitions);
         let compiled_schema = JSONSchema::compile(&schema).or_else(|_err| {
             Err(ExampleError {
                 is_request: self.is_request,
                 example: self.example.clone(),
-                schema: schema.clone(),
-                error: AppError::InvalidSchema,
+                schema: self.schema.clone(),
+                kind: ExampleErrorKind::UnparsableSchema,
             })
         })?;
 
         compiled_schema.validate(&self.example).map_err(|errors| {
-            let error = AppError::ValidationFailed(
-                NonEmpty::from_vec(
-                    errors
-                        .map(ValidationError::from)
-                        .collect::<Vec<ValidationError>>(),
-                )
-                .expect("non-empty vec of ValidationError expected"),
-            );
+            let validation_errors = NonEmpty::from_vec(errors.map(|e| format!("{}", e)).collect())
+                .expect("non-empty error list expected from failed schema validation");
             ExampleError {
                 is_request: self.is_request,
                 example: self.example.clone(),
                 schema: self.schema.clone(),
-                error,
+                kind: ExampleErrorKind::SchemaValidationFailed { validation_errors },
             }
         })
     }
@@ -172,15 +140,18 @@ impl ExamplePayload {
         is_request: bool,
     ) -> Option<Self> {
         let example = media_type.example.as_ref()?;
-        let schema_or_ref = media_type.schema.as_ref().map(|x| match x {
-            ReferenceOr::Item(schema) => ReferenceOr::Item(
-                serde_json::to_value(schema)
-                    .expect(&format!("Cannot serialise as JSON: {:?}", schema)),
-            ),
-            ReferenceOr::Reference { reference } => ReferenceOr::Reference {
-                reference: reference.to_owned(),
-            },
-        })?;
+        let schema_or_ref = media_type
+            .schema
+            .as_ref()
+            .map(|ref_or_item| match ref_or_item {
+                ReferenceOr::Item(schema) => ReferenceOr::Item(
+                    serde_json::to_value(schema)
+                        .expect(&format!("Cannot serialise as JSON: {:?}", schema)),
+                ),
+                ReferenceOr::Reference { reference } => ReferenceOr::Reference {
+                    reference: reference.to_owned(),
+                },
+            })?;
 
         extract_or_resolve(&schemas, &schema_or_ref).map(|schema| {
             let schema = serde_json::to_value(schema)
@@ -244,7 +215,7 @@ where
 
 #[derive(Debug)]
 pub(crate) struct ExamplePayloads {
-    operation_id: OperationId,
+    context: OperationContext,
     examples: NonEmpty<ExamplePayload>,
 }
 impl ExamplePayloads {
@@ -259,21 +230,20 @@ impl ExamplePayloads {
             None => Ok(()),
             Some(errors) => {
                 let mut report = IndexMap::new();
-                report.insert(self.operation_id.clone(), errors);
+                report.insert(self.context.clone(), errors);
                 Err(report)
             }
         }
     }
 
-    //need unit test
     pub(crate) async fn from_operations(
-        operations: &Vec<(OperationId, &Operation)>,
+        operations: &Vec<OperationWithContext>,
         components: &Components,
     ) -> Result<(), ErrorReport> {
         let mut report = IndexMap::new();
 
-        for (operation_id, operation) in operations {
-            if let Some(examples) = Self::from_operation(operation_id, operation, &components) {
+        for op in operations.iter() {
+            if let Some(examples) = Self::from_operation(&op.context, &op.operation, &components) {
                 if let Err(operation_report) = examples.validate(&components.schemas) {
                     report.extend(operation_report);
                 }
@@ -287,7 +257,7 @@ impl ExamplePayloads {
     }
 
     fn from_operation(
-        operation_id: &OperationId,
+        context: &OperationContext,
         operation: &openapiv3::Operation,
         components: &Components,
     ) -> Option<ExamplePayloads> {
@@ -320,7 +290,7 @@ impl ExamplePayloads {
         }
 
         NonEmpty::from_vec(examples).map(|examples| ExamplePayloads {
-            operation_id: operation_id.clone(),
+            context: context.clone(),
             examples,
         })
     }
@@ -410,19 +380,19 @@ fn needs_example(operation: &Operation) -> Option<SchemaNeedsExample> {
 }
 
 pub(crate) async fn need_example(
-    operations: &Vec<(OperationId, &Operation)>,
-) -> Result<(), IndexMap<OperationId, SchemaNeedsExample>> {
-    let mut operation_ids = IndexMap::new();
+    operations: &Vec<OperationWithContext>,
+) -> Result<(), IndexMap<OperationContext, SchemaNeedsExample>> {
+    let mut operation_errors = IndexMap::new();
 
-    for (operation_id, operation) in operations {
-        if let Some(schema_needs_example) = needs_example(operation) {
-            operation_ids.insert(operation_id.clone(), schema_needs_example);
+    for op in operations.iter() {
+        if let Some(schema_needs_example) = needs_example(&op.operation) {
+            operation_errors.insert(op.context.clone(), schema_needs_example);
         }
     }
-    if operation_ids.len() == 0 {
+    if operation_errors.len() == 0 {
         Ok(())
     } else {
-        Err(operation_ids)
+        Err(operation_errors)
     }
 }
 
@@ -461,11 +431,19 @@ mod tests {
         let mut definitions: IndexMap<String, Value> = IndexMap::new();
         definitions.insert(
             "Entity1".to_owned(),
-            json!({"$ref": "#/components/schemas/Entity2"}),
+            json!({
+                "properties": {
+                    "entities2": {
+                        "items": {
+                          "$ref": "#/components/schemas/Entity2"
+                        }
+                    }
+                }
+            }),
         );
         definitions.insert("Entity2".to_owned(), json!({"type": "string"}));
 
-        let mut schema = json!(
+        let schema = json!(
             {
                 "properties": {
                   "connections": {
@@ -478,9 +456,9 @@ mod tests {
                 "type": "object"
               }
         );
-        expand_schema_refs(&mut schema, &definitions);
+        let expanded = expand_schema_refs(&schema, &definitions);
         assert_eq!(
-            schema.pointer("/properties/connections/items"),
+            expanded.pointer("/properties/connections/items/properties/entities2/items"),
             Some(&json!({"type": "string"}))
         )
     }
