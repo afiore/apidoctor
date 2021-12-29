@@ -104,48 +104,44 @@ fn to_reference(value: &Value) -> Option<&str> {
     })
 }
 
-//TODO: refactor as follows:
-// - return a new value instead of mutating input
-// - incrementally expand definitions, so that references are resolved only once
-fn expand_schema_refs(schema: &mut Value, definitions: &IndexMap<String, Value>) {
+fn expand_schema_refs(schema: &Value, definitions: &IndexMap<String, Value>) -> Value {
     match schema {
         Value::Array(items) => {
-            for item in items {
-                expand_schema_refs(item, definitions);
-            }
+            let items = items
+                .iter()
+                .map(|item| expand_schema_refs(&item, definitions))
+                .collect();
+            Value::Array(items)
         }
-        //TODO: is there a way to avoid calling to_reference twice?
-        obj if to_reference(schema).is_some() => {
+        obj @ Value::Object(props) => {
             if let Some(reference) = to_reference(obj) {
                 let reference = strip_component_prefix(reference);
                 let definition = definitions
                     .get(&reference)
                     .expect(&format!("expected to find reference: {}", &reference));
 
-                //a reference can contain other references
-                let mut definition = definition.clone();
-                expand_schema_refs(&mut definition, definitions);
-                *obj = definition;
+                expand_schema_refs(&definition, definitions)
+            } else {
+                Value::Object(
+                    props
+                        .iter()
+                        .map(|(k, v)| (k.to_owned(), expand_schema_refs(&v, definitions)))
+                        .collect(),
+                )
             }
         }
-        Value::Object(props) => {
-            for (_, value) in props {
-                expand_schema_refs(value, definitions);
-            }
-        }
-        _ => (),
+        _ => schema.clone(),
     }
 }
 
 impl ExamplePayload {
     fn validate(&self, definitions: &IndexMap<String, Value>) -> Result<(), ExampleError> {
-        let mut schema = self.schema.clone();
-        expand_schema_refs(&mut schema, definitions);
+        let schema = expand_schema_refs(&self.schema, definitions);
         let compiled_schema = JSONSchema::compile(&schema).or_else(|_err| {
             Err(ExampleError {
                 is_request: self.is_request,
                 example: self.example.clone(),
-                schema: schema.clone(),
+                schema: self.schema.clone(),
                 error: AppError::InvalidSchema,
             })
         })?;
@@ -462,11 +458,20 @@ mod tests {
         let mut definitions: IndexMap<String, Value> = IndexMap::new();
         definitions.insert(
             "Entity1".to_owned(),
-            json!({"$ref": "#/components/schemas/Entity2"}),
+            json!({
+                "properties": {
+                    "entities2": {
+                        "items": {
+                          "$ref": "#/components/schemas/Entity2"
+                        }
+                    }
+                }
+            }),
+            // json!({"$ref": "#/components/schemas/Entity2"}),
         );
         definitions.insert("Entity2".to_owned(), json!({"type": "string"}));
 
-        let mut schema = json!(
+        let schema = json!(
             {
                 "properties": {
                   "connections": {
@@ -479,9 +484,9 @@ mod tests {
                 "type": "object"
               }
         );
-        expand_schema_refs(&mut schema, &definitions);
+        let expanded = expand_schema_refs(&schema, &definitions);
         assert_eq!(
-            schema.pointer("/properties/connections/items"),
+            expanded.pointer("/properties/connections/items/properties/entities2/items"),
             Some(&json!({"type": "string"}))
         )
     }
