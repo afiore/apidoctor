@@ -1,12 +1,11 @@
-use std::{convert::Infallible, env, error::Error, fmt::Display, path::PathBuf, str::FromStr};
+use std::{convert::Infallible, env, fmt::Display, io, path::PathBuf, str::FromStr};
 
-use examples::AppError;
 use futures::executor;
+use main_error::MainError;
 use openapi::operations::OperationId;
 use structopt::StructOpt;
-use thiserror::Error;
 
-use crate::openapi::linting::{lint, LintingIssues, LintingOutcome};
+use crate::openapi::linting::{lint, LintingOutcome};
 
 mod examples;
 mod openapi;
@@ -28,6 +27,24 @@ impl FromStr for Tag {
     }
 }
 
+#[derive(thiserror::Error, Debug)]
+enum AppError {
+    #[error(
+        "Could not deserialise the supplied spec file. Is it a valid, json-encoded, OpenAPI spec?"
+    )]
+    UnparsableJsonSpec(#[from] serde_json::Error),
+    #[error(
+        "Could not deserialise the supplied spec file. Is it a valid, yaml-encoded, OpenAPI spec?"
+    )]
+    UnparsableYamlSpec(#[from] serde_yaml::Error),
+    #[error("Could not find spec file")]
+    SpecFileNotFound(#[from] io::Error),
+    #[error("Could not find operation_id {}", 0)]
+    OperationNotFound(OperationId),
+    #[error("Linting failed")]
+    LintingFailed,
+}
+
 #[derive(Debug, StructOpt)]
 #[structopt(name = "apidoctor", about = "An API spec linter")]
 struct Cmd {
@@ -42,13 +59,7 @@ struct Cmd {
     tags: Vec<Tag>,
 }
 
-#[derive(Error, Debug)]
-pub enum CmdError {
-    #[error("validation failed!")]
-    ValidationFailed,
-}
-
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<(), MainError> {
     let cmd = Cmd::from_iter(env::args());
     let spec = openapi::spec_from_file(&cmd.spec)?;
     let outcome = executor::block_on(lint(&spec, cmd.tags, cmd.operation_id));
@@ -64,9 +75,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             operation_linting_issues,
         } => {
             println!("{}", stats);
-            for (i, (context, LintingIssues { issues })) in
-                operation_linting_issues.iter().enumerate()
-            {
+            for (i, (context, issues)) in operation_linting_issues.iter().enumerate() {
                 let s = if issues.len() > 1 { "s" } else { "" };
                 let tags: Vec<String> = context.tags.iter().map(ToString::to_string).collect();
 
@@ -83,7 +92,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     println!("* {}", err);
                 }
             }
-            Err(CmdError::ValidationFailed.into())
+            Err(AppError::LintingFailed.into())
         }
     }
 }

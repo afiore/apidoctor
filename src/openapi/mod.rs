@@ -1,23 +1,26 @@
 pub mod linting;
 pub mod operations;
 
-use std::{error::Error, fs::File, io::BufReader, path::Path};
+use std::{fs::File, io::BufReader, path::Path};
 
 use indexmap::IndexMap;
 
 use openapiv3::{OpenAPI, ReferenceOr, RequestBody, Response, StatusCode};
 use serde_json::Value;
 
-pub(crate) fn spec_from_file<P: AsRef<Path>>(path: P) -> Result<OpenAPI, Box<dyn Error>> {
+use crate::AppError;
+
+pub(crate) fn spec_from_file<P: AsRef<Path>>(path: P) -> Result<OpenAPI, AppError> {
     let file = File::open(path.as_ref())?;
     let reader = BufReader::new(file);
     let extension = path.as_ref().extension().and_then(|ext| ext.to_str());
 
-    if let Some("yml") | Some("yaml") = extension {
-        serde_yaml::from_reader(reader).map_err(Into::into)
+    let spec = if let Some("yml") | Some("yaml") = extension {
+        serde_yaml::from_reader(reader)?
     } else {
-        serde_json::from_reader(reader).map_err(Into::into)
-    }
+        serde_json::from_reader(reader)?
+    };
+    Ok(spec)
 }
 
 pub(crate) fn is_success(code: &StatusCode) -> bool {

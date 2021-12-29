@@ -1,6 +1,5 @@
 use std::error::Error;
 use std::fmt::Display;
-use std::io;
 
 use crate::openapi::is_success;
 use crate::openapi::operations::*;
@@ -14,32 +13,9 @@ use openapiv3::ReferenceOr;
 use serde_json::Value;
 
 #[derive(Debug)]
-pub(crate) struct ValidationError {
-    message: String,
-}
-
-impl<'a> From<jsonschema::ValidationError<'a>> for ValidationError {
-    fn from(err: jsonschema::ValidationError<'a>) -> Self {
-        ValidationError {
-            message: format!("{}", err),
-        }
-    }
-}
-
-#[derive(thiserror::Error, Debug)]
-pub(crate) enum AppError {
-    #[error(
-        "Could not deserialise the supplied spec file. Is it a valid, json-encoded, OpenAPI spec?"
-    )]
-    DeserializeationError(#[from] serde_json::Error),
-    #[error("Could not find spec file")]
-    SpecFileNotFound(#[from] io::Error),
-    #[error("Schema validation failed for some examples")]
-    ValidationFailed(NonEmpty<ValidationError>),
-    #[error("Unexpected error. Couldn't compile JSON schema")]
-    InvalidSchema,
-    #[error("Could not find operation_id {}", 0)]
-    OperationNotFound(OperationId),
+pub(crate) enum ExampleErrorKind {
+    UnparsableSchema,
+    SchemaValidationFailed { validation_errors: NonEmpty<String> },
 }
 
 #[derive(Debug)]
@@ -47,7 +23,7 @@ pub struct ExampleError {
     is_request: bool,
     example: Value,
     schema: Value,
-    error: AppError,
+    kind: ExampleErrorKind,
 }
 
 impl Error for ExampleError {}
@@ -57,16 +33,16 @@ impl Display for ExampleError {
         let snippet = serde_json::to_string_pretty(&self.example)
             .expect("failed to serialise example to JSON");
 
-        let errors = match &self.error {
-            AppError::ValidationFailed(validation_errs) => {
+        let errors = match &self.kind {
+            ExampleErrorKind::SchemaValidationFailed { validation_errors } => {
                 let mut s = String::new();
-                for err in validation_errs {
-                    s.push_str(&format!(" - {}\n", err.message))
+                for err in validation_errors {
+                    s.push_str(&format!(" - {}\n", err))
                 }
                 s
             }
 
-            _ => format!("{}", &self.error),
+            ExampleErrorKind::UnparsableSchema => "unparsable schema".to_owned(),
         };
 
         let request_response = if self.is_request {
@@ -142,24 +118,18 @@ impl ExamplePayload {
                 is_request: self.is_request,
                 example: self.example.clone(),
                 schema: self.schema.clone(),
-                error: AppError::InvalidSchema,
+                kind: ExampleErrorKind::UnparsableSchema,
             })
         })?;
 
         compiled_schema.validate(&self.example).map_err(|errors| {
-            let error = AppError::ValidationFailed(
-                NonEmpty::from_vec(
-                    errors
-                        .map(ValidationError::from)
-                        .collect::<Vec<ValidationError>>(),
-                )
-                .expect("non-empty vec of ValidationError expected"),
-            );
+            let validation_errors = NonEmpty::from_vec(errors.map(|e| format!("{}", e)).collect())
+                .expect("non-empty error list expected from failed schema validation");
             ExampleError {
                 is_request: self.is_request,
                 example: self.example.clone(),
                 schema: self.schema.clone(),
-                error,
+                kind: ExampleErrorKind::SchemaValidationFailed { validation_errors },
             }
         })
     }
@@ -170,15 +140,18 @@ impl ExamplePayload {
         is_request: bool,
     ) -> Option<Self> {
         let example = media_type.example.as_ref()?;
-        let schema_or_ref = media_type.schema.as_ref().map(|x| match x {
-            ReferenceOr::Item(schema) => ReferenceOr::Item(
-                serde_json::to_value(schema)
-                    .expect(&format!("Cannot serialise as JSON: {:?}", schema)),
-            ),
-            ReferenceOr::Reference { reference } => ReferenceOr::Reference {
-                reference: reference.to_owned(),
-            },
-        })?;
+        let schema_or_ref = media_type
+            .schema
+            .as_ref()
+            .map(|ref_or_item| match ref_or_item {
+                ReferenceOr::Item(schema) => ReferenceOr::Item(
+                    serde_json::to_value(schema)
+                        .expect(&format!("Cannot serialise as JSON: {:?}", schema)),
+                ),
+                ReferenceOr::Reference { reference } => ReferenceOr::Reference {
+                    reference: reference.to_owned(),
+                },
+            })?;
 
         extract_or_resolve(&schemas, &schema_or_ref).map(|schema| {
             let schema = serde_json::to_value(schema)
@@ -467,7 +440,6 @@ mod tests {
                     }
                 }
             }),
-            // json!({"$ref": "#/components/schemas/Entity2"}),
         );
         definitions.insert("Entity2".to_owned(), json!({"type": "string"}));
 

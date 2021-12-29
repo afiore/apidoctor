@@ -1,11 +1,10 @@
-use std::{error::Error, fmt::Display};
-
 use indexmap::IndexMap;
 use nonempty::NonEmpty;
 use openapiv3::{OpenAPI, Operation, PathItem};
+use std::fmt::Display;
 
 use crate::{
-    examples::{need_example, ExamplePayloads},
+    examples::{self, need_example, ExamplePayloads},
     Tag,
 };
 
@@ -49,12 +48,33 @@ impl Display for Stats {
 }
 
 #[derive(Debug)]
-pub(crate) struct LintingIssues {
-    //TODO: replace box in favour of an enum
-    pub issues: NonEmpty<Box<dyn Error>>,
+pub(crate) enum LintingIssue {
+    ExampleError(examples::ExampleError),
+    SchemaNeedsExample(examples::SchemaNeedsExample),
 }
 
-type OperationLintingIssues = IndexMap<OperationContext, LintingIssues>;
+impl Display for LintingIssue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LintingIssue::ExampleError(err) => write!(f, "{}", err),
+            LintingIssue::SchemaNeedsExample(err) => write!(f, "{}", err),
+        }
+    }
+}
+
+impl From<examples::ExampleError> for LintingIssue {
+    fn from(err: examples::ExampleError) -> Self {
+        LintingIssue::ExampleError(err)
+    }
+}
+
+impl From<examples::SchemaNeedsExample> for LintingIssue {
+    fn from(err: examples::SchemaNeedsExample) -> Self {
+        LintingIssue::SchemaNeedsExample(err)
+    }
+}
+
+type OperationLintingIssues = IndexMap<OperationContext, NonEmpty<LintingIssue>>;
 
 #[derive(Debug)]
 pub(crate) enum LintingOutcome {
@@ -116,14 +136,9 @@ pub(crate) async fn lint(
     );
 
     if let Err(operation_report) = operation_examples_result {
-        let operation_report: OperationLintingIssues = operation_report
+        let operation_report: IndexMap<OperationContext, NonEmpty<LintingIssue>> = operation_report
             .into_iter()
-            .map(|(op_id, errors)| {
-                let issues: NonEmpty<Box<dyn Error>> = errors.map(|e| e.into());
-
-                let issues = LintingIssues { issues };
-                (op_id.to_owned(), issues)
-            })
+            .map(|(key, errs)| (key, errs.map(From::from)))
             .collect();
 
         stats.operations_with_invalid_examples += operation_report.len() as u16;
@@ -135,14 +150,11 @@ pub(crate) async fn lint(
         stats.operations_needing_examples += needing_examples.len() as u16;
 
         for (operation_id, schema_needing_example) in needing_examples {
-            if let Some(LintingIssues { issues }) = operation_linting_issues.get_mut(&operation_id)
-            {
+            if let Some(issues) = operation_linting_issues.get_mut(&operation_id) {
                 issues.push(schema_needing_example.into());
             } else {
-                let linting_issues = LintingIssues {
-                    issues: NonEmpty::new(schema_needing_example.into()),
-                };
-                operation_linting_issues.insert(operation_id, linting_issues);
+                operation_linting_issues
+                    .insert(operation_id, NonEmpty::new(schema_needing_example.into()));
             }
         }
     }

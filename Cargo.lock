@@ -39,6 +39,7 @@ dependencies = [
  "futures",
  "indexmap",
  "jsonschema",
+ "main_error",
  "mime",
  "nonempty",
  "openapiv3",
@@ -565,6 +566,12 @@ checksum = "51b9bbe6c47d51fc3e1a9b945965946b4c44142ab8792c50835a980d362c2710"
 dependencies = [
  "cfg-if",
 ]
+
+[[package]]
+name = "main_error"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "155db5e86c6e45ee456bf32fad5a290ee1f7151c2faca27ea27097568da67d1a"
 
 [[package]]
 name = "matches"

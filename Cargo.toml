@@ -7,6 +7,7 @@ edition = "2021"
 
 [dependencies]
 thiserror = "1.0"
+main_error = "0.1"
 structopt = "0.3"
 openapiv3 = "0.5"
 openssl = {version = "0.10", features = ["vendored"]}
