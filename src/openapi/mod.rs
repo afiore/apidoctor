@@ -103,6 +103,8 @@ mod tests {
     fn test_operation(id: String) -> openapiv3::Operation {
         let mut operation = openapiv3::Operation::default();
         operation.operation_id = Some(id);
+        operation.tags = vec!["a".to_owned()];
+        operation.summary = Some("a test op".to_owned());
         operation
     }
 
@@ -215,12 +217,12 @@ mod tests {
             .paths
             .insert("/path/2".to_owned(), ReferenceOr::Item(path2));
 
-        if let LintingOutcome::AllGood(stats) =
-            futures::executor::block_on(lint(&spec, vec![], Some(operation_id.clone())))
-        {
+        let result = futures::executor::block_on(lint(&spec, vec![], Some(operation_id.clone())));
+        if let LintingOutcome::AllGood(stats) = result {
             assert_eq!(stats.total_operations, 2);
         } else {
-            panic!("LintingOutcome::AllGood expected!")
+            let error = format!("LintingOutcome::AllGood expected, got {:?}!", result);
+            panic!("{}", &error);
         }
     }
 }
