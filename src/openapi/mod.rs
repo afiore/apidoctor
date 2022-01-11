@@ -187,8 +187,8 @@ mod tests {
 
         if let LintingOutcome::OperationNotFound(op_id) = futures::executor::block_on(lint(
             &OpenAPI::default(),
-            vec![],
-            Some(operation_id.clone()),
+            &vec![],
+            &Some(operation_id.clone()),
         )) {
             assert_eq!(&op_id, &operation_id)
         } else {
@@ -217,7 +217,7 @@ mod tests {
             .paths
             .insert("/path/2".to_owned(), ReferenceOr::Item(path2));
 
-        let result = futures::executor::block_on(lint(&spec, vec![], Some(operation_id.clone())));
+        let result = futures::executor::block_on(lint(&spec, &vec![], &Some(operation_id.clone())));
         if let LintingOutcome::AllGood(stats) = result {
             assert_eq!(stats.total_operations, 2);
         } else {

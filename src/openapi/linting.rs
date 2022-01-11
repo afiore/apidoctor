@@ -104,8 +104,8 @@ pub(crate) enum LintingOutcome {
 
 pub(crate) async fn lint(
     spec: &OpenAPI,
-    tags: Vec<Tag>,
-    operation_id: Option<OperationId>,
+    tags: &Vec<Tag>,
+    operation_id: &Option<OperationId>,
 ) -> LintingOutcome {
     let components = spec
         .components
