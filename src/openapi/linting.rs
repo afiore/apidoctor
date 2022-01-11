@@ -116,7 +116,8 @@ pub(crate) async fn lint(
     let mut stats = Stats::default();
     let mut operation_linting_issues = IndexMap::new();
 
-    let path_items: Vec<(String, PathItem)> = super::clone_items(&spec.paths).into_iter().collect();
+    let path_items: Vec<(String, PathItem)> =
+        super::clone_items(&spec.paths.paths).into_iter().collect();
 
     let cli_filter: Box<dyn Fn(&Operation) -> bool> = match (&operation_id, &tags) {
         (Some(operation_id), _) => Box::new(|operation: &Operation| {

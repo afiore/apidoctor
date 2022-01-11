@@ -472,12 +472,8 @@ mod tests {
         let mut schemas = IndexMap::new();
         schemas.insert("testSchema".to_owned(), json!({"type": "object"}));
 
-        let media_type_no_example = MediaType {
-            schema: Some(schema.clone()),
-            example: None,
-            examples: IndexMap::new(),
-            encoding: IndexMap::new(),
-        };
+        let mut media_type_no_example = MediaType::default();
+        media_type_no_example.schema = Some(schema.clone());
 
         let mut media_types = IndexMap::new();
         media_types.insert("application/json".to_owned(), media_type_no_example);
@@ -494,6 +490,7 @@ mod tests {
             example: Some(example_payload.clone()),
             examples: IndexMap::new(),
             encoding: IndexMap::new(),
+            extensions: IndexMap::new(),
         };
         media_types.insert(
             "application/vnd.my.example.api+json".to_owned(),
@@ -518,10 +515,7 @@ mod tests {
             operation_id: Some("test-operation".to_owned()),
             parameters: vec![],
             request_body: None,
-            responses: Responses {
-                default: None,
-                responses: IndexMap::new(),
-            },
+            responses: Responses::default(),
             deprecated: false,
             security: None,
             servers: vec![],
@@ -534,6 +528,7 @@ mod tests {
             example,
             examples: IndexMap::new(),
             encoding: IndexMap::new(),
+            extensions: IndexMap::new(),
             schema: Some(ReferenceOr::Item(schema)),
         };
 

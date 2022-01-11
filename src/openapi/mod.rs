@@ -208,9 +208,11 @@ mod tests {
         });
 
         spec.paths
+            .paths
             .insert("/path/1".to_owned(), ReferenceOr::Item(path1));
 
         spec.paths
+            .paths
             .insert("/path/2".to_owned(), ReferenceOr::Item(path2));
 
         if let LintingOutcome::AllGood(stats) =
