@@ -1,4 +1,5 @@
 pub mod linting;
+pub mod metadata;
 pub mod operations;
 
 use std::{fs::File, io::BufReader, path::Path};

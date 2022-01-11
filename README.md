@@ -1,6 +1,6 @@
-# APIDoctor
+# 👩‍⚕️ APIDoctor
 
-A cli tool to sanity check OpenAPI specs
+ A cli tool to sanity check OpenAPI specs
 
 ## Usage
 
@@ -9,7 +9,7 @@ apidoctor 0.1.0
 An API spec linter
 
 USAGE:
-    apidoctor [OPTIONS] <spec>
+    apidoctor lint [OPTIONS] <spec>
 
 FLAGS:
     -h, --help       Prints help information
@@ -25,10 +25,11 @@ ARGS:
 
 ### Available linters
 
-Currently the following linters have been implemented:
+Currently the following linters have been implemented, and are always executed.
 
-- example request/response payloads that fail schema validation
-- operations that have have a request/response schema, but no example payloads
+- example request/response payloads that fail schema validation.
+- operations that have have a request/response schema, but no example payloads.
+- presence of key metadata: description/summary and tags
 
 ### ⚠️ Warning
 

@@ -47,52 +47,63 @@ enum AppError {
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "apidoctor", about = "An API spec linter")]
-struct Cmd {
-    /// path to JSON or YAML spec
-    #[structopt(parse(from_os_str))]
-    spec: PathBuf,
-    /// Filter issue by the given operation id
-    #[structopt(short, long)]
-    operation_id: Option<OperationId>,
-    /// Filter issue by the given set of tags
-    #[structopt(short, long)]
-    tags: Vec<Tag>,
+enum Cmd {
+    Lint {
+        /// path to JSON or YAML spec
+        #[structopt(parse(from_os_str))]
+        spec: PathBuf,
+        /// Filter issue by the given operation id
+        #[structopt(short, long)]
+        operation_id: Option<OperationId>,
+        /// Filter issue by the given set of tags
+        #[structopt(short, long)]
+        tags: Vec<Tag>,
+    },
 }
 
 fn main() -> Result<(), MainError> {
     let cmd = Cmd::from_iter(env::args());
-    let spec = openapi::spec_from_file(&cmd.spec)?;
-    let outcome = executor::block_on(lint(&spec, cmd.tags, cmd.operation_id));
-
-    match outcome {
-        LintingOutcome::OperationNotFound(operation_id) => {
-            Err(AppError::OperationNotFound(operation_id).into())
-        }
-
-        LintingOutcome::AllGood(stats) => Ok(println!("{}", stats)),
-        LintingOutcome::IssuesFound {
-            stats,
-            operation_linting_issues,
+    match cmd {
+        Cmd::Lint {
+            spec,
+            operation_id,
+            tags,
         } => {
-            println!("{}", stats);
-            for (i, (context, issues)) in operation_linting_issues.iter().enumerate() {
-                let s = if issues.len() > 1 { "s" } else { "" };
-                let tags: Vec<String> = context.tags.iter().map(ToString::to_string).collect();
+            let spec = openapi::spec_from_file(&spec)?;
+            let outcome = executor::block_on(lint(&spec, tags, operation_id));
 
-                println!(
-                    "{:0>3}. {:<40} tags: {:<35} {:>2} issue{}:\n",
-                    i + 1,
-                    format!("{}", context.id),
-                    tags.join(", "),
-                    issues.len(),
-                    s,
-                );
+            match outcome {
+                LintingOutcome::OperationNotFound(operation_id) => {
+                    Err(AppError::OperationNotFound(operation_id).into())
+                }
 
-                for err in issues {
-                    println!("* {}", err);
+                LintingOutcome::AllGood(stats) => Ok(println!("{}", stats)),
+                LintingOutcome::IssuesFound {
+                    stats,
+                    operation_linting_issues,
+                } => {
+                    println!("{}", stats);
+                    for (i, (context, issues)) in operation_linting_issues.iter().enumerate() {
+                        let s = if issues.len() > 1 { "s" } else { "" };
+                        let tags: Vec<String> =
+                            context.tags.iter().map(ToString::to_string).collect();
+
+                        println!(
+                            "{:0>3}. {:<40} tags: {:<35} {:>2} issue{}:\n",
+                            i + 1,
+                            format!("{}", context.id),
+                            tags.join(", "),
+                            issues.len(),
+                            s,
+                        );
+
+                        for err in issues {
+                            println!("* {}\n", err);
+                        }
+                    }
+                    Err(AppError::LintingFailed.into())
                 }
             }
-            Err(AppError::LintingFailed.into())
         }
     }
 }
