@@ -5,17 +5,19 @@ use std::fmt::Display;
 
 use crate::{
     examples::{self, need_example, ExamplePayloads},
+    openapi::metadata::need_metadata,
     Tag,
 };
 
-use super::operations::*;
 use super::Components;
+use super::{metadata, operations::*};
 
 #[derive(Debug, Default)]
 pub(crate) struct Stats {
     pub total_operations: u16,
     pub matching_filters: u16,
     pub operations_needing_examples: u16,
+    pub operations_needing_metadata: u16,
     pub operations_with_invalid_examples: u16,
 }
 
@@ -42,6 +44,11 @@ impl Display for Stats {
             "{:<15}: {:>3}",
             "Invalid examples", self.operations_with_invalid_examples
         )?;
+        writeln!(
+            f,
+            "{:<15}: {:>3}",
+            "Needing metadata", self.operations_needing_metadata
+        )?;
 
         Ok(())
     }
@@ -51,6 +58,7 @@ impl Display for Stats {
 pub(crate) enum LintingIssue {
     ExampleError(examples::ExampleError),
     SchemaNeedsExample(examples::SchemaNeedsExample),
+    NeedsMetadata(metadata::NeedsMetadata),
 }
 
 impl Display for LintingIssue {
@@ -58,6 +66,9 @@ impl Display for LintingIssue {
         match self {
             LintingIssue::ExampleError(err) => write!(f, "{}", err),
             LintingIssue::SchemaNeedsExample(err) => write!(f, "{}", err),
+            LintingIssue::NeedsMetadata(err) => {
+                write!(f, "Metadata missing: {}", err)
+            }
         }
     }
 }
@@ -71,6 +82,11 @@ impl From<examples::ExampleError> for LintingIssue {
 impl From<examples::SchemaNeedsExample> for LintingIssue {
     fn from(err: examples::SchemaNeedsExample) -> Self {
         LintingIssue::SchemaNeedsExample(err)
+    }
+}
+impl From<metadata::NeedsMetadata> for LintingIssue {
+    fn from(err: metadata::NeedsMetadata) -> Self {
+        LintingIssue::NeedsMetadata(err)
     }
 }
 
@@ -130,9 +146,10 @@ pub(crate) async fn lint(
         return LintingOutcome::OperationNotFound(operation_id);
     }
 
-    let (operation_examples_result, needing_example_result) = futures::join!(
+    let (operation_examples_result, needing_example_result, needing_metadata_result) = futures::join!(
         ExamplePayloads::from_operations(&operations, &components),
-        need_example(&operations)
+        need_example(&operations),
+        need_metadata(&operations)
     );
 
     if let Err(operation_report) = operation_examples_result {
@@ -150,6 +167,17 @@ pub(crate) async fn lint(
         stats.operations_needing_examples += needing_examples.len() as u16;
 
         for (operation_id, schema_needing_example) in needing_examples {
+            if let Some(issues) = operation_linting_issues.get_mut(&operation_id) {
+                issues.push(schema_needing_example.into());
+            } else {
+                operation_linting_issues
+                    .insert(operation_id, NonEmpty::new(schema_needing_example.into()));
+            }
+        }
+    }
+    if let Err(needing_metadata) = needing_metadata_result {
+        stats.operations_needing_metadata += needing_metadata.len() as u16;
+        for (operation_id, schema_needing_example) in needing_metadata {
             if let Some(issues) = operation_linting_issues.get_mut(&operation_id) {
                 issues.push(schema_needing_example.into());
             } else {
