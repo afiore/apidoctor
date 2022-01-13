@@ -2,8 +2,9 @@ use std::{convert::Infallible, env, fmt::Display, io, path::PathBuf, str::FromSt
 
 use futures::executor;
 use main_error::MainError;
-use notify::{watcher, RecursiveMode, Watcher};
+use notify::{watcher, DebouncedEvent, RecursiveMode, Watcher};
 use openapi::operations::OperationId;
+use std::fs;
 use std::sync::mpsc::channel;
 use std::time::Duration;
 use structopt::StructOpt;
@@ -46,8 +47,6 @@ enum AppError {
     OperationNotFound(OperationId),
     #[error("Linting failed")]
     LintingFailed,
-    #[error("Filesystem watcher error")]
-    WatcherError,
 }
 
 #[derive(Debug, StructOpt)]
@@ -60,6 +59,9 @@ enum Cmd {
         /// Watch spec file for changes
         #[structopt(short, long)]
         watch: bool,
+        /// Display only linting counts, omitting detailed messages
+        #[structopt(short, long)]
+        summary: bool,
         /// Filter issue by the given operation id
         #[structopt(short, long)]
         operation_id: Option<OperationId>,
@@ -75,41 +77,64 @@ fn main() -> Result<(), MainError> {
         Cmd::Lint {
             spec,
             watch,
+            summary,
             operation_id,
             tags,
         } => {
             if watch {
                 //avoid returning on error
-                let _ = lint_spec(&spec, &tags, &operation_id);
+                let _ = lint_spec(&spec, &tags, &operation_id, summary);
                 let (tx, rx) = channel();
+                let spec_path = spec.as_path();
+                let spec_dir = spec_path.parent().expect("parent expected");
 
-                let mut watcher = watcher(tx, Duration::from_secs(1)).unwrap();
+                let mut watcher = watcher(tx, Duration::from_secs(5)).unwrap();
 
-                watcher.watch(&spec, RecursiveMode::NonRecursive).unwrap();
+                watcher
+                    .watch(spec_dir, RecursiveMode::NonRecursive)
+                    .unwrap();
 
                 loop {
-                    //TODO: interpolate spec file path
-                    eprintln!("Watching for changes in spec file...");
+                    eprintln!("Watching for changes in spec file: {}", spec_path.display());
                     match rx.recv() {
-                        Ok(e) => {
-                            println!("got an event: {:?}", e);
-                            //let _ = lint_spec(&spec, &tags, &operation_id);
+                        Ok(event) => {
+                            if trigger_lint(&event, &spec) {
+                                let _ = lint_spec(&spec, &tags, &operation_id, summary);
+                            }
                         }
                         Err(err) => {
-                            println!("got an error: {:?}", err);
-                        } //break Err(AppError::WatcherError.into()),
+                            eprintln!("Error while watching spec file: {:?}", err);
+                        }
                     }
                 }
             } else {
-                lint_spec(&spec, &tags, &operation_id)
+                lint_spec(&spec, &tags, &operation_id, summary)
             }
         }
     }
 }
+
+fn trigger_lint(event: &DebouncedEvent, spec: &PathBuf) -> bool {
+    match event {
+        DebouncedEvent::NoticeWrite(path) => paths_match(path, spec),
+        DebouncedEvent::NoticeRemove(path) => paths_match(path, spec),
+        DebouncedEvent::Create(path) => paths_match(path, spec),
+        DebouncedEvent::Write(path) => paths_match(path, spec),
+        _ => false,
+    }
+}
+
+fn paths_match(p1: &PathBuf, p2: &PathBuf) -> bool {
+    fs::canonicalize(p1)
+        .and_then(|p1| fs::canonicalize(p2).map(|p2| p1 == p2))
+        .unwrap_or(false)
+}
+
 fn lint_spec(
     spec: &PathBuf,
     tags: &Vec<Tag>,
     operation_id: &Option<OperationId>,
+    summary: bool,
 ) -> Result<(), MainError> {
     let spec = openapi::spec_from_file(&spec)?;
     let outcome = executor::block_on(lint(&spec, tags, operation_id));
@@ -125,6 +150,10 @@ fn lint_spec(
             operation_linting_issues,
         } => {
             println!("{}", stats);
+            if summary {
+                return Err(AppError::LintingFailed.into());
+            }
+
             for (i, (context, issues)) in operation_linting_issues.iter().enumerate() {
                 let s = if issues.len() > 1 { "s" } else { "" };
                 let tags: Vec<String> = context.tags.iter().map(ToString::to_string).collect();
