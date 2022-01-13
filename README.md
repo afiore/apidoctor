@@ -5,15 +5,16 @@
 ## Usage
 
 ```
-apidoctor 0.1.0
-An API spec linter
+apidoctor-lint 0.1.0
 
 USAGE:
-    apidoctor lint [OPTIONS] <spec>
+    apidoctor lint [FLAGS] [OPTIONS] <spec>
 
 FLAGS:
     -h, --help       Prints help information
+    -s, --summary    Display only linting counts, omitting detailed messages
     -V, --version    Prints version information
+    -w, --watch      Watch spec file for changes
 
 OPTIONS:
     -o, --operation-id <operation-id>    Filter issue by the given operation id
