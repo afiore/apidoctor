@@ -1,0 +1,12 @@
+name: GH-Action
+on:
+  workflow_dispatch:
+jobs:
+  Build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v1
+      - uses: afiore/action-apidoctor@main
+        with:
+          spec: petstore.json
+          options: -s
